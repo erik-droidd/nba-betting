@@ -1,0 +1,451 @@
+# NBA Betting System — Usage Guide
+
+## Overview
+
+This system predicts NBA game outcomes using an ensemble model (Elo ratings + gradient boosting), compares predictions against market odds (Polymarket + ESPN/DraftKings), and recommends bets when it finds an edge. It uses a **Bayesian-shrunken** model probability (treating the market as a strong prior), an **asymmetric bet-side floor** that kills lottery-ticket bets, quarter-Kelly sizing, and generates plain-English explanations for each recommendation.
+
+---
+
+## Initial Setup (First Time Only)
+
+### 1. Install Dependencies
+
+```bash
+cd "NBA Betting"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### 2. Load Historical Data
+
+Fetch 3 seasons of NBA game data from NBA.com and compute Elo ratings. This takes several minutes due to API rate limiting (2.5s per call).
+
+```bash
+python3 -m nba_betting sync --seasons 3
+```
+
+This will:
+- Download team box scores for the last 3 seasons
+- Store them in `data/nba_betting.db` (SQLite)
+- Compute Elo ratings for all 30 teams
+- Auto-resolve any pending predictions from previous runs
+
+### 3. Train the Model
+
+```bash
+python3 -m nba_betting train
+```
+
+This will:
+- Build a feature matrix (60 features: rolling stats, Four Factors, **points-against / net rating / Pythagorean expectation**, rest days, Elo)
+- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries
+- Report accuracy, Brier score, and log loss per fold
+- Train the final model on all data
+- **Calibrate probabilities via isotonic regression** (replaces Platt sigmoid, which over-compressed tails on the ~54% home-win base rate)
+- **Grid-search the optimal Elo-vs-GBM ensemble weight** by minimizing log-loss on the calibration fold — the learned weight is saved to `trained_models/ensemble_weight.joblib` and reloaded automatically at prediction time
+- Save all model artifacts to `trained_models/`
+
+**Expected output**: ~63-65% walk-forward accuracy, Brier score ~0.223, calibrated ECE ~0.00-0.02.
+
+### 4. Sync Player Rosters (Optional, Improves Predictions)
+
+```bash
+python3 -m nba_betting sync-players
+```
+
+Fetches rosters and depth charts from ESPN for all 30 teams. Used for injury impact estimation. Rate-limited, takes ~2 minutes.
+
+---
+
+## Daily Workflow
+
+Run these commands on game days to get betting recommendations.
+
+### Step 1: Sync Today's Data
+
+```bash
+python3 -m nba_betting sync
+```
+
+Fetches any new game results since your last sync. Updates Elo ratings and resolves pending predictions. Run this once per day, ideally in the morning or before games start.
+
+### Step 2: Get Predictions
+
+```bash
+python3 -m nba_betting predict
+```
+
+This is the main command. It will:
+1. Fetch today's NBA games from NBA.com (uses **US Eastern time** to determine "today" regardless of your local timezone, so users in Europe/Asia see the correct slate). If today has no remaining scheduled games, it falls back to the next available game day within the next 7 days and labels the output accordingly.
+2. Load current Elo ratings
+3. Sync injuries from ESPN (automatic — ~150 players tracked)
+4. Fetch market odds from Polymarket (filters out closed/resolved markets) and ESPN/DraftKings as fallback
+5. Snapshot odds for line movement tracking
+6. Run the ensemble model (Elo + calibrated GBM, blended in **log-odds space** with a weight learned during training)
+7. **Apply injury adjustments** to the raw model probability (each injured player reduces team strength based on their impact rating)
+8. **Bayesian-shrink** the injury-adjusted model probability toward the market log-odds (λ = 0.6 by default — market-leaning). This is the single biggest change to how the system filters bets: small model-vs-market disagreements get pulled back to the market, and only decisive conviction survives.
+9. Compute edge against the **shrunken** probability (not the raw model) — so model%, market%, and edge% reconcile exactly in the UI
+10. Apply the **asymmetric bet-side floor** (`MIN_BET_SIDE_PROB = 0.30`): the system refuses to bet a team the model itself only gives a <30% chance of winning, even if the edge math looks positive. This kills "lottery-ticket" bets where positive EV depends on a tail price the model isn't really contradicting.
+11. Size bets using quarter-Kelly criterion
+12. Display recommendations with explanations (the explanation prefers feature signals that *agree* with the bet; if every surface stat contradicts the bet, it says so honestly rather than parroting misleading reasoning)
+
+**Output columns**:
+| Column | Meaning |
+|--------|---------|
+| Matchup | Away @ Home |
+| Model | Model's **post-shrinkage** P(home win) — the same number the edge is computed against, so the math reconciles in the UI |
+| Market | Polymarket/ESPN implied P(home win) |
+| Bet | Team abbreviation to bet on (or "—" for no bet) |
+| Edge | Expected value per $1 against market price: `(shrunken_prob / market_prob) - 1` |
+| Kelly | Optimal bet fraction of bankroll (quarter-Kelly with 5% cap) |
+| Size | Dollar amount to bet |
+| Signal | Confidence: STRONG (5-15%), MODERATE (3-5%), LEAN (2-3%), SUSPECT (>15%). Rows rejected by the bet-side floor show `NO BET` — never SUSPECT — to avoid confusing warnings on rows we already filtered out. |
+
+**Sub-rows rendered below each matchup** (console + dashboard):
+- **Spread / Total picks**: when ESPN spread and O/U lines are available and the model disagrees by more than the edge threshold (1.5 pts spread, 2.5 pts total), a pick row appears, e.g. `BOS +4.5` or `OVER 221.5`. No sub-row is shown when the model's point-margin edge is below the threshold.
+- **Driver chips**: top 3 features driving the model's prediction, each showing the feature label and its ±probability shift. Positive chips (green) push toward the home team; negative chips (red) push toward the away team. These come from a leave-one-out-to-mean attribution on the base GBM (not the isotonic wrapper), so the magnitudes are self-consistent. Chips are filtered by a 0.5 pp noise floor — sub-threshold shifts are suppressed.
+
+Below the table, each recommended bet includes a plain-English explanation of why the model favors it, with the displayed model% matching the Model column exactly.
+
+### How to Interpret the Results
+
+**Model vs Market — what do they mean?**
+
+- **Model** is the system's estimated probability that the **home team** wins (e.g., "41.7%" means the model thinks the home team wins ~42% of the time).
+- **Market** is the implied probability from Polymarket or ESPN odds — what the betting market thinks.
+- The **Bet** column shows the team abbreviation you should bet on. If it shows "—", there's no recommended bet.
+
+**Value betting — why bet on a team with <50% win probability?**
+
+The system finds **value**, not just winners. A bet is profitable when the payout exceeds the risk, even if the team loses more often than it wins.
+
+**Example**: The model says WAS has a 42% chance to win, but the market prices them at 30%.
+- At 30% market odds, a $1 bet pays ~$3.33 if WAS wins.
+- Expected value: 42% × $3.33 = $1.40 return per $1 bet → **+$0.40 profit per dollar**.
+- Over many bets like this, you profit even though WAS loses most individual games.
+
+The **Edge** column shows this expected profit per dollar (41.4% in this example). It's calculated as:
+```
+Edge = (Model Probability × Decimal Odds) - 1
+     = (Model Probability / Market Probability) - 1
+```
+
+**Signal levels:**
+
+| Signal | Edge | Meaning |
+|--------|------|---------|
+| **STRONG** | 5-15% | High-confidence bet. Model sees significant mispricing. |
+| **MODERATE** | 3-5% | Good bet. Solid edge but smaller margin. |
+| **LEAN** | 2-3% | Marginal. Skip if unsure — the edge is thin. |
+| **SUSPECT** | >15% | **Warning**: Edge is unrealistically large. This usually means stale/incorrect market data, thin Polymarket liquidity, or a model error. **Verify the market odds manually before betting.** |
+
+**What to do with each signal:**
+- **STRONG/MODERATE**: Bet the team shown in the "Bet" column on Polymarket (or your platform). Use the dollar amount in "Size".
+- **LEAN**: Optional — only bet if you trust the matchup context.
+- **SUSPECT**: Do **not** bet blindly. Open Polymarket/the sportsbook and check if the market price is accurate. If the real odds differ from what the system shows, the edge is artificial. The CLI prints a red `⚠ SUSPECT EDGE` warning above the explanation, and the dashboard shows a red badge.
+- **NO BET / "—"**: The model doesn't see enough edge. Skip this game. Also shown when the market column displays "N/A" — meaning no live market is available (game already started, no Polymarket listing, etc.).
+
+**About Bayesian shrinkage (the key filter):**
+
+Before the edge is computed, the model's probability is pulled toward the market in log-odds space:
+
+```
+posterior_logit = (1 - λ) · model_logit + λ · market_logit
+```
+
+- `λ = 0.0` → pure model (old behavior, produced tons of phantom >15% edges)
+- `λ = 1.0` → pure market (never bets)
+- **`λ = 0.6`** → default. Market is treated as a strong prior; model conviction has to be large to move the needle.
+
+This is the Bayesian-correct stance when the prior (market) is known to be highly efficient and the model is roughly competitive with it. You can tune `MARKET_SHRINKAGE_LAMBDA` in `nba_betting/config.py` if you want a more aggressive (lower λ) or more conservative (higher λ) system. If a game has no market price at all, shrinkage is skipped — but the asymmetric floor still applies.
+
+**About the asymmetric bet-side floor:**
+
+Even with positive-EV edge math, the system refuses to bet a side the model itself gives less than `MIN_BET_SIDE_PROB = 0.30` to win. This is standard quant practice: if your model only assigns 15% to a team winning, betting them at 10% market odds is a "lottery ticket" — the math says +EV, but the model isn't really contradicting the market, it's betting the noise on a tail.
+
+With shrinkage + floor, the system now produces **far fewer** SUSPECT badges and much smaller daily exposure. On a recent 15-game slate the counts went from 12 SUSPECT / 14 actionable / $700 exposure → 1 SUSPECT / 4 actionable / $119 exposure.
+
+**About injury adjustments:**
+
+The model itself was trained only on team-level historical stats — it has no awareness of who's playing tonight. To compensate, the system applies a post-hoc adjustment based on the current ESPN injury report:
+- A starter (impact 7) being **Out** lowers their team's win probability by ~4%
+- A star (impact 8-10) being **Out** lowers it by ~5-6%
+- A team's total injury hit is capped at -15%
+
+This adjustment is applied **before** edge is computed, so the Model column already reflects today's injuries. If you see the explanation mention an injury, that injury has already been factored into the displayed probability.
+
+**Options**:
+```bash
+python3 -m nba_betting predict --bankroll 5000    # Custom bankroll
+python3 -m nba_betting predict --model elo        # Elo-only (no GBM)
+python3 -m nba_betting predict --model ensemble   # Force ensemble
+```
+
+### Step 2b: Snapshot Odds (for Line Movement Tracking)
+
+```bash
+python3 -m nba_betting snapshot-odds
+```
+
+Records a point-in-time snapshot of current Polymarket + ESPN odds for today's games in the `odds_snapshots` database table. The model uses consecutive snapshots to compute three features: `spread_movement`, `prob_movement`, and `odds_disagreement` (Polymarket vs ESPN). These features have zero signal until at least two snapshots exist for a game.
+
+**Run this on a cron every 30–60 minutes during the season** (e.g. `*/30 * * * * cd "NBA Betting" && .venv/bin/python -m nba_betting snapshot-odds`). After ~30 days of snapshots the `odds_disagreement` feature becomes meaningful for retraining.
+
+> **Note**: odds snapshots accumulate forward — historical games in the training set have these features set to 0.0. The model learns to use them only when they're non-zero (i.e., live season data).
+
+### Step 3: Place Bets
+
+Use the recommendations to place bets on Polymarket or your preferred platform. The system recommends quarter-Kelly sizing (conservative) with a 5% max per bet and 25% max total exposure.
+
+**Rules of thumb**:
+- Only bet on STRONG or MODERATE signals (3%+ edge)
+- LEAN signals (2-3% edge) are marginal — skip if unsure
+- Never exceed the recommended bet size
+- The system caps total exposure at 25% of bankroll
+
+---
+
+## Checking Performance
+
+### After Games Complete
+
+Once games finish, sync the results and check how your predictions did:
+
+```bash
+python3 -m nba_betting sync          # Fetches final scores, resolves predictions
+python3 -m nba_betting performance   # Shows accuracy, ROI, calibration
+```
+
+**Performance output includes**:
+- **Prediction Accuracy**: % of games where model picked the correct winner
+- **Bet Win Rate**: % of placed bets that won
+- **Total Wagered / Profit / ROI**: Dollar amounts and return on investment
+- **Max Drawdown**: Worst peak-to-trough decline
+- **Calibration Check**: Predicted vs actual win rates by probability bin (should be close to diagonal)
+
+### Backtesting (Historical Simulation)
+
+To see how the strategy would have performed on past data:
+
+```bash
+python3 -m nba_betting backtest
+python3 -m nba_betting backtest --bankroll 5000 --splits 3
+```
+
+Reports: win rate, ROI, Sharpe ratio, max drawdown, and per-signal breakdown.
+
+**Backtest modes** — four combinations control whether real market odds and live shrinkage are applied:
+
+| Command | `--real-odds` | `--live-strategy` | What it measures |
+|---------|:---:|:---:|-----------------|
+| `backtest` | off | off | **Pure model benchmark** — ideal for ablation. No shrinkage, no real market odds; uses Elo-proxy as the "market". |
+| `backtest --real-odds` | on | **on** (auto) | **Live-equivalent simulation** — applies the same Bayesian shrinkage and asymmetric floor that `predict` uses. Best for realistic ROI estimates. |
+| `backtest --real-odds --no-live-strategy` | on | off | Real odds with shrinkage disabled — useful for isolating the effect of shrinkage on ROI. |
+| `backtest --raw-model` | off | off | Uses the **base GBM** (pre-isotonic calibration) — ablation to measure the value added by calibration. |
+
+The `--live-strategy` flag defaults to `None`, which resolves to `True` when `--real-odds` is set and `False` otherwise. Pass `--live-strategy` / `--no-live-strategy` explicitly to override.
+
+```bash
+python3 -m nba_betting backtest --real-odds                      # Live-equivalent (recommended)
+python3 -m nba_betting backtest --real-odds --no-live-strategy   # Real odds, no shrinkage
+python3 -m nba_betting backtest --raw-model                      # Pre-calibration ablation
+```
+
+### Monte Carlo Simulation
+
+To understand the range of possible outcomes:
+
+```bash
+python3 -m nba_betting simulate
+python3 -m nba_betting simulate --n-sims 50000
+```
+
+Runs 10,000 (default) simulated seasons by resampling from backtest results. Reports median/percentile bankroll outcomes, probability of profit, and probability of ruin.
+
+---
+
+## Diagnostics & Troubleshooting
+
+### Validate the Pipeline
+
+```bash
+python3 -m nba_betting diagnose
+```
+
+Checks:
+- Elo ratings exist and are reasonable (mean ~1500)
+- GBM model and calibration loaded
+- Feature means saved for prediction imputation
+- Polymarket odds fetched and prices correct
+- Today's games with Elo predictions
+
+### Check Feature Readiness
+
+```bash
+python3 -m nba_betting readiness-status
+```
+
+Reports how many days of injury and odds-snapshot data have accumulated. The player-impact and line-movement features are forward-accumulating — they start at zero and become meaningful only after enough live-season data exists. Use this command monthly to know when it's worth retraining:
+
+| Status | Injury days | Snapshot days | Meaning |
+|--------|:-----------:|:-------------:|---------|
+| **COLD** | < 5 | < 5 | Features are essentially zero — retraining now gains nothing from them |
+| **PARTIAL** | 5–29 | 5–29 | Sparse signal. Retraining helps a little but wait for READY |
+| **READY** | ≥ 30 | ≥ 30 | Enough data — retrain with `train` to unlock the new features |
+
+The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to accumulate line-movement data").
+
+### Run the Test Suite
+
+```bash
+cd "NBA Betting" && .venv/bin/python -m pytest tests/test_new_features.py -v
+```
+
+16 fast unit tests covering: shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence. Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
+
+### Common Issues
+
+**"Market" column shows N/A for every game**
+- Polymarket has no live (open) market for that game. The system filters out closed/resolved markets to prevent stale prices from yesterday's results bleeding into today's edges. If every game shows N/A, you're likely running `predict` after games have started — markets close at tipoff.
+- Run `python3 -m nba_betting diagnose` to confirm Polymarket is reachable.
+
+**Showing the wrong day's games (or "next game day" appears unexpectedly)**
+- "Today" is determined in **US Eastern time** (the NBA scheduling timezone), not your local timezone. If you're in Europe or Asia and run `predict` early in your morning, ET may still be on the prior day — that's expected behavior, not a bug.
+- The system queries `ScoreboardV3` with an explicit ET date (not the live `ScoreBoard()` endpoint, which can return a stale prior-day cache for hours after rollover).
+- If today has zero scheduled games, the title becomes `Recommendations for YYYY-MM-DD (next game day)` and shows the next slate within 7 days. To force-check today, run `diagnose` to see what date the system resolved.
+
+**Many bets show SUSPECT (>15% edge)**
+- The model and market disagree wildly. Likely causes: thin Polymarket liquidity on that matchup, a bad data feed, or the model hasn't been retrained recently. Run `python3 -m nba_betting train` and verify the walk-forward accuracy is in the 62-66% range and ECE < 0.04.
+
+**Predictions ignore obvious injuries**
+- Run `python3 -m nba_betting injury sync` to refresh from ESPN, then `python3 -m nba_betting injury list` to confirm key players are flagged. If a star is missing from ESPN's report, add a manual override with `injury add`.
+
+### Manage Injuries
+
+```bash
+python3 -m nba_betting injury sync              # Auto-sync from ESPN
+python3 -m nba_betting injury list              # View current injuries
+python3 -m nba_betting injury add "LeBron James" --team LAL --impact 9  # Manual override
+python3 -m nba_betting injury remove "LeBron James"
+python3 -m nba_betting injury clear             # Clear all
+```
+
+ESPN injuries are auto-synced every time you run `predict`. Manual overrides are preserved across ESPN syncs.
+
+### View Elo Ratings
+
+```bash
+python3 -m nba_betting elo
+```
+
+Shows all 30 teams ranked by Elo rating with deviation from league average.
+
+---
+
+## Web Dashboard
+
+```bash
+python3 -m nba_betting serve
+```
+
+Opens a web dashboard at `http://localhost:8050` with three tabs:
+- **Predictions**: Today's games with model/market probabilities, bet recommendations, spread, O/U, and explanations. If today (ET) has no remaining scheduled games, the header shows `Recommendations for YYYY-MM-DD (next game day)` and renders the next available slate.
+- **Elo Ratings**: Team rankings
+- **Performance**: Historical accuracy and ROI metrics
+
+---
+
+## When to Run What
+
+| When | Command | Why |
+|------|---------|-----|
+| First time | `sync --seasons 3` then `train` | Load data and build model |
+| Start of season | `sync --seasons 3` then `train` | Retrain with fresh data |
+| Daily (morning) | `sync` | Get yesterday's results, update Elo |
+| Before games | `predict` | Get today's recommendations |
+| Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron |
+| After games | `sync` then `performance` | Check results and accuracy |
+| Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
+| Monthly | `train` | Retrain model with latest data |
+| Monthly | `sync-players` | Update player rosters and depth charts |
+| Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
+| As needed | `diagnose` | Debug issues with predictions |
+| After any code change | `pytest tests/test_new_features.py -v` | Guard against silent regressions |
+
+---
+
+## Data Flow
+
+```
+NBA.com (game stats) ──┐
+                       ├──> SQLite DB ──> Feature Matrix ──> GBM Model ─┐
+ESPN (injuries,        │                                                 │
+  odds, depth charts) ─┘                                                 │
+                                                                         ├──> Recommendations
+Polymarket (odds) ─────────> Market Prices ──────────────────────────────┘         │
+ESPN/DraftKings (odds) ────> Fallback Prices + Spread/O/U ──────────────┘         │
+                                                                                   ▼
+                                                                    Terminal / Dashboard
+```
+
+## File Structure
+
+```
+data/
+  nba_betting.db          # SQLite database (games, stats, Elo, player stats, odds)
+  prediction_history.json # Prediction tracking for performance analysis
+  injuries.json           # Current injury list (ESPN + manual overrides)
+
+trained_models/
+  gbm_latest.joblib         # Trained GBM base model
+  calibrated_model.joblib   # Isotonic-calibrated model (wraps the base)
+  feature_cols.joblib       # Feature column order
+  feature_means.joblib      # Training means for NaN imputation
+  ensemble_weight.joblib    # Grid-searched optimal Elo weight for log-odds blend
+```
+
+---
+
+## All Commands Reference
+
+```bash
+# Data & model
+python3 -m nba_betting sync --seasons 3         # Fetch game data + compute Elo
+python3 -m nba_betting train                     # Train GBM model + calibrate
+python3 -m nba_betting sync-players              # Sync player rosters from ESPN
+
+# Predictions
+python3 -m nba_betting predict                   # Today's recommendations + explanations
+python3 -m nba_betting predict --bankroll 5000   # Custom bankroll
+python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on a cron)
+
+# Backtesting (four modes)
+python3 -m nba_betting backtest                              # Pure model benchmark (no market odds)
+python3 -m nba_betting backtest --real-odds                  # Live-equivalent (shrinkage applied) ← recommended
+python3 -m nba_betting backtest --real-odds --no-live-strategy  # Real odds, shrinkage off
+python3 -m nba_betting backtest --raw-model                  # Pre-calibration ablation
+python3 -m nba_betting backtest --bankroll 5000 --splits 3   # Custom bankroll / folds
+
+# Performance & analysis
+python3 -m nba_betting elo                       # Current Elo standings
+python3 -m nba_betting performance               # Historical accuracy + ROI
+python3 -m nba_betting simulate                  # Monte Carlo bankroll simulation
+python3 -m nba_betting simulate --n-sims 50000
+
+# Diagnostics
+python3 -m nba_betting diagnose                  # Validate prediction pipeline
+python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
+pytest tests/test_new_features.py -v             # 16 unit tests (run after any code change)
+
+# Injuries
+python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN
+python3 -m nba_betting injury list               # View current injury list
+python3 -m nba_betting injury add 'Name' --team LAL --impact 8  # Manual override
+python3 -m nba_betting injury remove 'Name'
+python3 -m nba_betting injury clear
+
+# Dashboard
+python3 -m nba_betting serve                     # Launch web dashboard at localhost:8050
+python3 -m nba_betting commands                  # Show this help in terminal
+```

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.db
+data/*.db
+data/*.json
+trained_models/*.joblib
+.env
+.DS_Store
+*.sqlite
+*.sqlite3
+.claude/

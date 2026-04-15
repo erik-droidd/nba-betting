@@ -1,0 +1,26 @@
+[project]
+name = "nba-betting"
+version = "0.1.0"
+description = "NBA betting recommendation system with Elo ratings and Polymarket integration"
+requires-python = ">=3.9"
+dependencies = [
+    "nba_api>=1.4",
+    "requests>=2.31",
+    "pandas>=1.5",
+    "numpy>=1.21",
+    "scikit-learn>=1.2",
+    "xgboost>=1.7",
+    "sqlalchemy>=2.0",
+    "typer>=0.9",
+    "rich>=13.0",
+]
+
+[project.scripts]
+nba-betting = "nba_betting.cli:app"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nba_betting*"]
