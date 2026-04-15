@@ -1,0 +1,46 @@
+{
+  "name": "NBA Betting",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bullseye",
+
+  // Install Python dependencies automatically when the container starts.
+  "postCreateCommand": "pip install -e '.[dev]' 2>/dev/null || pip install -e .",
+
+  // Persist the data/ and trained_models/ directories across Codespace
+  // rebuilds by mounting them into a named volume. Without this, a
+  // Codespace rebuild would wipe your SQLite DB and trained weights.
+  "mounts": [
+    "source=nba-betting-data,target=${containerWorkspaceFolder}/data,type=volume",
+    "source=nba-betting-models,target=${containerWorkspaceFolder}/trained_models,type=volume"
+  ],
+
+  // VS Code extensions pre-installed in the Codespace.
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "tamasfe.even-better-toml",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.python"
+        },
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // Forward the dashboard port so you can open it in the browser.
+  "forwardPorts": [8050],
+  "portsAttributes": {
+    "8050": {
+      "label": "NBA Dashboard",
+      "onAutoForward": "openPreview"
+    }
+  }
+}
