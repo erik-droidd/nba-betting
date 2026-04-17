@@ -114,6 +114,16 @@ nba_betting/
 │   │                              + ESPN sync. Preserves manual overrides.
 │   │                              get_team_injury_adjustment(abbr) returns
 │   │                              the post-hoc probability delta.
+│   ├── lineups.py              — Pre-game probable starters via ESPN
+│   │                              scoreboard (~30–90 min before tip).
+│   │                              fetch_probable_starters() returns
+│   │                              {team_abbr: [player_name]}; empty if
+│   │                              ESPN hasn't published yet. Called lazily
+│   │                              in cli.predict — non-critical, failure
+│   │                              is silently swallowed.
+│   │                              apply_lineup_bumps() raises impact rating
+│   │                              for starter-tier players absent from the
+│   │                              published lineup (surprise DNPs).
 │   ├── player_stats.py         — Roster + depth chart sync into PlayerStat.
 │   └── odds_tracker.py         — snapshot_current_odds / get_line_movement
 │                                 (opening-vs-current spread & prob).
