@@ -11,7 +11,11 @@ def get_predictions(bankroll: float = Query(1000.0)):
     """Get today's game predictions with model probabilities and market odds."""
     from nba_betting.data.nba_stats import fetch_todays_games, fetch_upcoming_games
     from nba_betting.data.polymarket import get_nba_odds
-    from nba_betting.models.elo import get_current_elos, predict_home_win_prob
+    from nba_betting.models.elo import (
+        get_current_elos,
+        get_current_off_def_elos,
+        predict_home_win_prob,
+    )
     from nba_betting.models.xgboost_model import load_model
     from nba_betting.models.calibration import load_calibrated_model
     from nba_betting.models.ensemble import ensemble_predict
@@ -30,6 +34,12 @@ def get_predictions(bankroll: float = Query(1000.0)):
     elos = get_current_elos()
     if not elos:
         return {"error": "No Elo ratings. Run sync first."}
+    # Tier 1.3 — pull split off/def Elo alongside the aggregate. Falls
+    # back silently (to INITIAL_ELO) if the migration hasn't run yet.
+    try:
+        off_def_elos = get_current_off_def_elos()
+    except Exception:
+        off_def_elos = {}
 
     # Try to load XGBoost (or its calibrated wrapper) for the ensemble.
     # IMPORTANT: load_model() deserializes joblib from disk, so we cache
@@ -106,10 +116,17 @@ def get_predictions(bankroll: float = Query(1000.0)):
                     extra["prob_movement"] = lm.get("prob_movement", 0.0)
                     extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
 
+            # Tier 1.3 — inject split off/def Elo when available.
+            h_off_def = off_def_elos.get(home_id) if home_id else None
+            a_off_def = off_def_elos.get(away_id) if away_id else None
             feat_row = build_prediction_features(
                 home_id, away_id, rolling_df, home_elo, away_elo,
                 feature_means=feat_means,
                 extra_features=extra or None,
+                home_elo_off=h_off_def[0] if h_off_def else None,
+                home_elo_def=h_off_def[1] if h_off_def else None,
+                away_elo_off=a_off_def[0] if a_off_def else None,
+                away_elo_def=a_off_def[1] if a_off_def else None,
             )
             if feat_row is None:
                 return predict_home_win_prob(home_elo, away_elo)

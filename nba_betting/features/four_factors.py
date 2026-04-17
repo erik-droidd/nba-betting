@@ -32,24 +32,26 @@ def add_opponent_rebound_data(df: pd.DataFrame) -> pd.DataFrame:
     """Add opponent DREB to compute ORB%.
 
     Requires DataFrame to have game_id, team_id, home_team_id, away_team_id, dreb.
+
+    Tier 3.2 — vectorized. The opponent of each team-game is simply the
+    *other* row within the same game_id group, so we can derive opp_dreb
+    by grouping on game_id and subtracting this row's dreb from the
+    two-row sum. That's a pure pandas broadcast; the old groupby+.apply
+    was O(N_games * 2) Python calls, this is a single vectorized op.
     """
     df = df.copy()
 
-    # For each team-game row, find the opponent's DREB
-    # The opponent is the other team in the same game
-    opp_dreb = {}
-    for game_id, group in df.groupby("game_id"):
-        if len(group) != 2:
-            continue
-        rows = group.to_dict("records")
-        for i in range(2):
-            j = 1 - i
-            key = (game_id, rows[i]["team_id"])
-            opp_dreb[key] = rows[j]["dreb"]
+    # Sum dreb within each game (one number per game_id, broadcast to rows).
+    # In a well-formed game stats table each game_id has exactly two rows —
+    # the opponent's dreb = game_total_dreb - this_row_dreb.
+    df["_game_dreb_total"] = df.groupby("game_id")["dreb"].transform("sum")
+    df["opp_dreb"] = df["_game_dreb_total"] - df["dreb"]
+    df = df.drop(columns=["_game_dreb_total"])
 
-    df["opp_dreb"] = df.apply(
-        lambda r: opp_dreb.get((r["game_id"], r["team_id"]), 0), axis=1
-    )
+    # Safety fallback: rows where a game unexpectedly has a single team
+    # (malformed data) would get opp_dreb == 0 from the math above, which
+    # is the same behavior as the previous .apply fallback — so no
+    # explicit handling is needed.
 
     # ORB% = OREB / (OREB + OPP_DREB)
     total_reb_chances = df["oreb"] + df["opp_dreb"]

@@ -1,12 +1,68 @@
 """Odds snapshot storage for line movement tracking."""
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from sqlalchemy import select
 
 from nba_betting.db.models import OddsSnapshot, Team
 from nba_betting.db.session import get_session
+
+# Tier 3.4 — dedup window + tolerance. If a new snapshot arrives within
+# ``_DEDUP_WINDOW`` of the last one for the same (game, source) and the
+# key fields (``home_prob``, ``spread``, ``over_under``) haven't moved
+# beyond ``_DEDUP_TOLERANCE_PROB`` / ``_DEDUP_TOLERANCE_SPREAD``, we skip
+# the insert. This lets a cron run every 15 min without bloating the
+# table when lines aren't moving — common overnight behavior.
+_DEDUP_WINDOW = timedelta(hours=4)
+_DEDUP_TOLERANCE_PROB = 0.005  # 0.5 pct-point
+_DEDUP_TOLERANCE_SPREAD = 0.5  # half a point
+
+
+def _is_duplicate(
+    session,
+    *,
+    game_date: date,
+    home_team_id: int,
+    away_team_id: int,
+    source: str,
+    now: datetime,
+    home_prob: float | None,
+    spread: float | None,
+    over_under: float | None,
+) -> bool:
+    """Return True if the most recent same-source snapshot is effectively
+    identical to what we're about to insert — no line movement in the
+    dedup window."""
+    latest = session.execute(
+        select(OddsSnapshot)
+        .where(
+            OddsSnapshot.game_date == game_date,
+            OddsSnapshot.home_team_id == home_team_id,
+            OddsSnapshot.away_team_id == away_team_id,
+            OddsSnapshot.source == source,
+        )
+        .order_by(OddsSnapshot.timestamp.desc())
+        .limit(1)
+    ).scalars().first()
+
+    if latest is None:
+        return False
+    if latest.timestamp is None or (now - latest.timestamp) > _DEDUP_WINDOW:
+        return False
+
+    def _close(a, b, tol) -> bool:
+        if a is None and b is None:
+            return True
+        if a is None or b is None:
+            return False
+        return abs(float(a) - float(b)) <= tol
+
+    return (
+        _close(latest.home_prob, home_prob, _DEDUP_TOLERANCE_PROB)
+        and _close(latest.spread, spread, _DEDUP_TOLERANCE_SPREAD)
+        and _close(latest.over_under, over_under, _DEDUP_TOLERANCE_SPREAD)
+    )
 
 
 def snapshot_current_odds(
@@ -80,35 +136,61 @@ def snapshot_current_odds(
             poly = poly_by_teams.get(key)
             if poly:
                 t = poly.get("teams", {})
-                session.add(OddsSnapshot(
-                    game_id=game_id,
+                poly_home_prob = t.get(home_abbr)
+                if not _is_duplicate(
+                    session,
                     game_date=game_date_val,
                     home_team_id=home_id,
                     away_team_id=away_id,
                     source="polymarket",
-                    timestamp=now,
-                    home_prob=t.get(home_abbr),
+                    now=now,
+                    home_prob=poly_home_prob,
                     spread=None,
                     over_under=None,
-                ))
-                count += 1
+                ):
+                    session.add(OddsSnapshot(
+                        game_id=game_id,
+                        game_date=game_date_val,
+                        home_team_id=home_id,
+                        away_team_id=away_id,
+                        source="polymarket",
+                        timestamp=now,
+                        home_prob=poly_home_prob,
+                        spread=None,
+                        over_under=None,
+                    ))
+                    count += 1
 
             # ESPN snapshot
             espn = espn_by_teams.get(key)
             if espn:
                 t = espn.get("teams", {})
-                session.add(OddsSnapshot(
-                    game_id=game_id,
+                espn_home_prob = t.get(home_abbr)
+                espn_spread = espn.get("spread")
+                espn_ou = espn.get("over_under")
+                if not _is_duplicate(
+                    session,
                     game_date=game_date_val,
                     home_team_id=home_id,
                     away_team_id=away_id,
                     source="espn",
-                    timestamp=now,
-                    home_prob=t.get(home_abbr),
-                    spread=espn.get("spread"),
-                    over_under=espn.get("over_under"),
-                ))
-                count += 1
+                    now=now,
+                    home_prob=espn_home_prob,
+                    spread=espn_spread,
+                    over_under=espn_ou,
+                ):
+                    session.add(OddsSnapshot(
+                        game_id=game_id,
+                        game_date=game_date_val,
+                        home_team_id=home_id,
+                        away_team_id=away_id,
+                        source="espn",
+                        timestamp=now,
+                        home_prob=espn_home_prob,
+                        spread=espn_spread,
+                        over_under=espn_ou,
+                    ))
+                    count += 1
 
         session.commit()
         return count

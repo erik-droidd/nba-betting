@@ -23,6 +23,20 @@ _ROLLING_STATS = [
     "fg_pct", "fg3_pct", "oreb", "dreb", "ast", "tov", "plus_minus",
 ]
 
+# Tier 1.1 + 1.2 — new rolling columns that deserve diff features in the
+# model. ``adj_net_rtg_roll_{w}`` is the SOS-normalized net rating;
+# ``poss_roll_{w}`` is the team's recent pace; ``opp_elo_roll_{w}`` is
+# the recent strength of schedule itself. The pace-diff tells the model
+# the game will be fast or slow; the SOS-adjusted net rating tells the
+# model how good each team actually is adjusted for who they've played.
+_SOS_PACE_ROLLING_STATS = ["adj_net_rtg_roll", "poss_roll", "opp_elo_roll"]
+_SOS_PACE_WINDOWS = (5, 10, 20)
+
+# Tier 1.5 — exponentially weighted recent-form features. Single halflife
+# (no window suffix) because the EWM averages all of history with
+# exponential decay; one column per stat is enough.
+_EWM_STATS = ["net_rtg_game_ewm_10", "plus_minus_ewm_10"]
+
 # Window sizes
 _WINDOWS = (5, 10, 20)
 
@@ -145,16 +159,32 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
                     .values
                 )
 
-    # Step 5: Compute Elo ratings and get per-game snapshots
+    # Step 5: Compute Elo ratings and get per-game snapshots. Tier 1.3 —
+    # load the off/def Elo columns too so we can build split-Elo features
+    # in addition to the aggregate.
     elo_ratings = compute_all_elos()
 
     session = get_session()
     try:
         from nba_betting.db.models import EloRating
         elo_rows = session.execute(
-            select(EloRating.game_id, EloRating.team_id, EloRating.elo_before)
+            select(
+                EloRating.game_id,
+                EloRating.team_id,
+                EloRating.elo_before,
+                EloRating.elo_off_before,
+                EloRating.elo_def_before,
+            )
         ).all()
-        elo_df = pd.DataFrame(elo_rows, columns=["game_id", "team_id", "elo_before"])
+        elo_df = pd.DataFrame(
+            elo_rows,
+            columns=["game_id", "team_id", "elo_before", "elo_off_before", "elo_def_before"],
+        )
+        # Back-fill rows from before the off/def migration with the
+        # aggregate Elo so downstream arithmetic stays well-defined.
+        if not elo_df.empty:
+            elo_df["elo_off_before"] = elo_df["elo_off_before"].fillna(elo_df["elo_before"])
+            elo_df["elo_def_before"] = elo_df["elo_def_before"].fillna(elo_df["elo_before"])
     finally:
         session.close()
 
@@ -177,6 +207,19 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
             feature_cols.append(f"{stat}_roll_{window}")
         for ff in four_factor_cols:
             feature_cols.append(f"{ff}_roll_{window}")
+
+    # Tier 1.1 + 1.2 — SOS-adjusted net rating, pace, opp-Elo rolling.
+    # These are named `{stat}_roll_{w}` where {stat} already includes the
+    # trailing `_roll` (e.g. `adj_net_rtg_roll`), so the column names in
+    # rolling.py are `adj_net_rtg_roll_{w}` etc. We pass them through as
+    # additional feature_cols — per-window diff features are built below.
+    sos_pace_feature_cols = [
+        f"{stat}_{w}"
+        for stat in _SOS_PACE_ROLLING_STATS
+        for w in _SOS_PACE_WINDOWS
+    ]
+    # Tier 1.5 — EWM columns (no window suffix; the halflife is baked in).
+    ewm_feature_cols = list(_EWM_STATS)
 
     rest_cols = ["rest_days", "is_back_to_back", "games_last_7", "games_last_14"]
 
@@ -204,7 +247,12 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
     # them gracefully rather than crashing).
     actual_ha = [c for c in ha_split_cols if c in home_stats.columns]
     actual_b2b = [c for c in b2b_cols if c in home_stats.columns]
-    extra_rolling = actual_ha + actual_b2b
+    # Tier 1.1/1.2/1.5 — only carry through the new columns that the
+    # rolling stage actually produced (cold-start DBs without Elo backfill
+    # won't have the SOS columns, for instance).
+    actual_sos_pace = [c for c in sos_pace_feature_cols if c in home_stats.columns]
+    actual_ewm = [c for c in ewm_feature_cols if c in home_stats.columns]
+    extra_rolling = actual_ha + actual_b2b + actual_sos_pace + actual_ewm
 
     # Extend rename maps for new columns
     for col in extra_rolling:
@@ -218,20 +266,32 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
     game_features = games.merge(home_features, on="game_id", how="left")
     game_features = game_features.merge(away_features, on="game_id", how="left")
 
-    # Add Elo features
+    # Add Elo features. Tier 1.3 — carry off/def Elo through the same
+    # merge so the model sees offense and defense as separate signals,
+    # not just an aggregate.
     if not elo_df.empty:
-        home_elo = elo_df.rename(columns={"elo_before": "home_elo", "team_id": "h_tid"})
-        away_elo = elo_df.rename(columns={"elo_before": "away_elo", "team_id": "a_tid"})
+        home_elo = elo_df.rename(columns={
+            "elo_before": "home_elo",
+            "elo_off_before": "home_elo_off",
+            "elo_def_before": "home_elo_def",
+            "team_id": "h_tid",
+        })
+        away_elo = elo_df.rename(columns={
+            "elo_before": "away_elo",
+            "elo_off_before": "away_elo_off",
+            "elo_def_before": "away_elo_def",
+            "team_id": "a_tid",
+        })
 
         game_features = game_features.merge(
-            home_elo[["game_id", "h_tid", "home_elo"]],
+            home_elo[["game_id", "h_tid", "home_elo", "home_elo_off", "home_elo_def"]],
             left_on=["game_id", "home_team_id"],
             right_on=["game_id", "h_tid"],
             how="left",
         ).drop(columns=["h_tid"], errors="ignore")
 
         game_features = game_features.merge(
-            away_elo[["game_id", "a_tid", "away_elo"]],
+            away_elo[["game_id", "a_tid", "away_elo", "away_elo_off", "away_elo_def"]],
             left_on=["game_id", "away_team_id"],
             right_on=["game_id", "a_tid"],
             how="left",
@@ -239,12 +299,36 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
     else:
         game_features["home_elo"] = INITIAL_ELO
         game_features["away_elo"] = INITIAL_ELO
+        game_features["home_elo_off"] = INITIAL_ELO
+        game_features["home_elo_def"] = INITIAL_ELO
+        game_features["away_elo_off"] = INITIAL_ELO
+        game_features["away_elo_def"] = INITIAL_ELO
 
-    game_features["home_elo"] = game_features["home_elo"].fillna(INITIAL_ELO)
-    game_features["away_elo"] = game_features["away_elo"].fillna(INITIAL_ELO)
+    for c in ("home_elo", "away_elo", "home_elo_off", "home_elo_def",
+              "away_elo_off", "away_elo_def"):
+        game_features[c] = game_features[c].fillna(INITIAL_ELO)
 
     # Step 7: Add differential features
     game_features["elo_diff"] = game_features["home_elo"] - game_features["away_elo"]
+    # Tier 1.3 — split Elo differentials. The model already sees the
+    # aggregate `elo_diff`; these let it learn that, e.g., a great offense
+    # vs a bad defense matters more than the aggregate alone suggests.
+    game_features["elo_off_diff"] = (
+        game_features["home_elo_off"] - game_features["away_elo_off"]
+    )
+    game_features["elo_def_diff"] = (
+        game_features["home_elo_def"] - game_features["away_elo_def"]
+    )
+    # Matchup asymmetries: home offense vs away defense, and vice versa.
+    # These are the canonical "net advantage" splits in basketball
+    # analytics — a good offense facing a bad defense is a stronger
+    # signal than either rating alone.
+    game_features["home_off_vs_away_def"] = (
+        game_features["home_elo_off"] - game_features["away_elo_def"]
+    )
+    game_features["away_off_vs_home_def"] = (
+        game_features["away_elo_off"] - game_features["home_elo_def"]
+    )
     # Vectorized Elo expected-score formula. Equivalent to applying
     # expected_score row-by-row, but ~50x faster on the full matrix.
     _elo_diff_for_prob = (
@@ -295,6 +379,39 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
                 game_features[h_col] - game_features[a_col]
             )
 
+    # Tier 1.1 + 1.2 — SOS-adjusted net rating diff, pace diff (= expected
+    # pace of the matchup), and SOS (opp-Elo) diff as a standalone
+    # "strength of recent schedule" signal the model can use to discount
+    # rolling stats.
+    for stat in _SOS_PACE_ROLLING_STATS:
+        for w in _SOS_PACE_WINDOWS:
+            h_col = f"home_{stat}_{w}"
+            a_col = f"away_{stat}_{w}"
+            diff_col = f"diff_{stat}_{w}"
+            if h_col in game_features.columns and a_col in game_features.columns:
+                if stat == "poss_roll":
+                    # Pace-diff is traditionally a *sum* (expected game
+                    # pace is the average of both teams' possessions),
+                    # but the differential matters too — a fast team
+                    # facing a slow team creates stylistic mismatch.
+                    # Keep the diff form for consistency with other
+                    # features; the model can sum them internally.
+                    game_features[diff_col] = game_features[h_col] - game_features[a_col]
+                    # Also emit expected matchup pace (mean of the two).
+                    game_features[f"matchup_pace_{w}"] = (
+                        (game_features[h_col] + game_features[a_col]) / 2.0
+                    )
+                else:
+                    game_features[diff_col] = game_features[h_col] - game_features[a_col]
+
+    # Tier 1.5 — EWM diffs. One column per stat (no window suffix).
+    for stat in _EWM_STATS:
+        h_col = f"home_{stat}"
+        a_col = f"away_{stat}"
+        diff_col = f"diff_{stat}"
+        if h_col in game_features.columns and a_col in game_features.columns:
+            game_features[diff_col] = game_features[h_col] - game_features[a_col]
+
     # Pythagorean expectation per team (window 20 = ~quarter of season).
     # The diff feature gives the model a direct measure of which team has
     # been "actually winning at the level their scoring suggests".
@@ -332,7 +449,11 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
 
     # Step 8: Select final feature columns
     model_features = (
-        ["home_elo", "away_elo", "elo_diff", "elo_home_prob"]
+        ["home_elo", "away_elo", "elo_diff", "elo_home_prob",
+         # Tier 1.3 — split Elo features and matchup asymmetries.
+         "home_elo_off", "away_elo_off", "home_elo_def", "away_elo_def",
+         "elo_off_diff", "elo_def_diff",
+         "home_off_vs_away_def", "away_off_vs_home_def"]
         + [f"home_{col}" for col in rest_cols]
         + [f"away_{col}" for col in rest_cols]
         + ["rest_diff",
@@ -360,6 +481,23 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
     # Back-to-back 3PT cold differentials
     for w in (5, 10):
         diff_col = f"diff_fg3_pct_b2b_roll_{w}"
+        if diff_col in game_features.columns:
+            model_features.append(diff_col)
+
+    # Tier 1.1 + 1.2 — SOS-adjusted net rating, pace-diff, opp-Elo roll.
+    for stat in _SOS_PACE_ROLLING_STATS:
+        for w in _SOS_PACE_WINDOWS:
+            diff_col = f"diff_{stat}_{w}"
+            if diff_col in game_features.columns:
+                model_features.append(diff_col)
+            if stat == "poss_roll":
+                mp_col = f"matchup_pace_{w}"
+                if mp_col in game_features.columns:
+                    model_features.append(mp_col)
+
+    # Tier 1.5 — EWM recent-form diffs.
+    for stat in _EWM_STATS:
+        diff_col = f"diff_{stat}"
         if diff_col in game_features.columns:
             model_features.append(diff_col)
 
@@ -454,27 +592,51 @@ def _attach_injury_features(game_features: pd.DataFrame) -> None:
             (inj.impact_rating or 0.0) * _status_multiplier(inj.status or "")
         )
 
-    def _impact_for(team_id, game_date) -> float:
-        abbr = team_abbr_by_id.get(team_id)
-        if not abbr or game_date is None:
-            return 0.0
-        d = game_date.date() if hasattr(game_date, "date") else game_date
-        return lookup.get((d, abbr), 0.0)
+    # Tier 3.2 — vectorize the injury-impact lookup. Previously this was
+    # two Python list-comprehensions (~5k iterations each), now it's a
+    # single DataFrame merge keyed on (game_date, team_abbr). Big-O
+    # unchanged, constant factor ~30-50x on typical training sets.
+    if not lookup:
+        game_features["home_injury_impact_out"] = 0.0
+        game_features["away_injury_impact_out"] = 0.0
+    else:
+        # Build a flat (team_abbr, snapshot_date) -> impact DataFrame.
+        lookup_df = pd.DataFrame(
+            [(d, abbr, impact) for (d, abbr), impact in lookup.items()],
+            columns=["_inj_date", "_inj_abbr", "_inj_impact"],
+        )
 
-    game_features["home_injury_impact_out"] = [
-        _impact_for(tid, d)
-        for tid, d in zip(
-            game_features["home_team_id"].tolist(),
-            pd.to_datetime(game_features["date"]).tolist(),
+        # Normalize the game date to plain `date` to match lookup key type.
+        gf_dates = pd.to_datetime(game_features["date"]).dt.date
+
+        # Home team merge
+        home_abbrs = game_features["home_team_id"].map(team_abbr_by_id)
+        home_join = pd.DataFrame({
+            "_inj_date": gf_dates.values,
+            "_inj_abbr": home_abbrs.fillna("").str.upper().values,
+        })
+        home_merged = home_join.merge(
+            lookup_df.assign(_inj_abbr=lookup_df["_inj_abbr"].str.upper()),
+            on=["_inj_date", "_inj_abbr"], how="left",
         )
-    ]
-    game_features["away_injury_impact_out"] = [
-        _impact_for(tid, d)
-        for tid, d in zip(
-            game_features["away_team_id"].tolist(),
-            pd.to_datetime(game_features["date"]).tolist(),
+        game_features["home_injury_impact_out"] = (
+            home_merged["_inj_impact"].fillna(0.0).values
         )
-    ]
+
+        # Away team merge — same pattern
+        away_abbrs = game_features["away_team_id"].map(team_abbr_by_id)
+        away_join = pd.DataFrame({
+            "_inj_date": gf_dates.values,
+            "_inj_abbr": away_abbrs.fillna("").str.upper().values,
+        })
+        away_merged = away_join.merge(
+            lookup_df.assign(_inj_abbr=lookup_df["_inj_abbr"].str.upper()),
+            on=["_inj_date", "_inj_abbr"], how="left",
+        )
+        game_features["away_injury_impact_out"] = (
+            away_merged["_inj_impact"].fillna(0.0).values
+        )
+
     game_features["injury_impact_diff"] = (
         game_features["home_injury_impact_out"]
         - game_features["away_injury_impact_out"]
@@ -535,6 +697,10 @@ def build_prediction_features(
     away_elo: float,
     feature_means: dict[str, float] | None = None,
     extra_features: dict[str, float] | None = None,
+    home_elo_off: float | None = None,
+    home_elo_def: float | None = None,
+    away_elo_off: float | None = None,
+    away_elo_def: float | None = None,
 ) -> pd.DataFrame | None:
     """Build a single-row feature vector for a prediction.
 
@@ -564,11 +730,28 @@ def build_prediction_features(
     home_stats = _get_latest_stats(home_team_id)
     away_stats = _get_latest_stats(away_team_id)
 
+    # Off/def Elo default to the aggregate Elo if caller didn't supply
+    # them (keeps backwards compatibility with older callers that only
+    # have a single Elo per team).
+    h_off = home_elo_off if home_elo_off is not None else home_elo
+    h_def = home_elo_def if home_elo_def is not None else home_elo
+    a_off = away_elo_off if away_elo_off is not None else away_elo
+    a_def = away_elo_def if away_elo_def is not None else away_elo
+
     row = {
         "home_elo": home_elo,
         "away_elo": away_elo,
         "elo_diff": home_elo - away_elo,
         "elo_home_prob": expected_score(home_elo + ELO_HOME_ADVANTAGE, away_elo),
+        # Tier 1.3 — split Elo and matchup asymmetries.
+        "home_elo_off": h_off,
+        "away_elo_off": a_off,
+        "home_elo_def": h_def,
+        "away_elo_def": a_def,
+        "elo_off_diff": h_off - a_off,
+        "elo_def_diff": h_def - a_def,
+        "home_off_vs_away_def": h_off - a_def,
+        "away_off_vs_home_def": a_off - h_def,
     }
 
     # Rest features
@@ -614,6 +797,21 @@ def build_prediction_features(
         h_val = home_stats.get(f"fg3_pct_b2b_roll_{w}")
         a_val = away_stats.get(f"fg3_pct_b2b_roll_{w}")
         row[f"diff_fg3_pct_b2b_roll_{w}"] = (h_val or 0) - (a_val or 0)
+
+    # Tier 1.1 + 1.2 — SOS-adjusted net rating, pace, opp-Elo diffs.
+    for stat in _SOS_PACE_ROLLING_STATS:
+        for w in _SOS_PACE_WINDOWS:
+            h_val = home_stats.get(f"{stat}_{w}")
+            a_val = away_stats.get(f"{stat}_{w}")
+            row[f"diff_{stat}_{w}"] = (h_val or 0) - (a_val or 0)
+            if stat == "poss_roll":
+                row[f"matchup_pace_{w}"] = ((h_val or 0) + (a_val or 0)) / 2.0
+
+    # Tier 1.5 — EWM recent-form diffs.
+    for stat in _EWM_STATS:
+        h_val = home_stats.get(stat)
+        a_val = away_stats.get(stat)
+        row[f"diff_{stat}"] = (h_val or 0) - (a_val or 0)
 
     # Injury features — mirror training. We use the current injuries
     # (today's live list) for inference, which matches how

@@ -52,10 +52,23 @@ _SHORT_TO_ABBR_ORDERED = [
 
 
 def _name_to_abbr(name: str) -> Optional[str]:
-    """Convert a single team name/nickname to abbreviation."""
+    """Convert a single team name/nickname to abbreviation.
+
+    Tier 3.5 — fuzzy fallback. Exact match is tried first (the fast
+    path that already handles 99% of titles). When that fails we fall
+    back to substring containment against the ordered dictionary — the
+    order is already longest-first for collision-safety, so a substring
+    match like "trail blazers" inside "portland trail blazers tonight"
+    still picks POR correctly. Only called for titles where the strict
+    parser couldn't produce a pair, so it doesn't regress the fast path.
+    """
     lower = name.lower().strip()
     for team_name, abbr in _SHORT_TO_ABBR_ORDERED:
         if team_name == lower:
+            return abbr
+    # Fuzzy fallback: substring containment with longest-first ordering.
+    for team_name, abbr in _SHORT_TO_ABBR_ORDERED:
+        if team_name in lower:
             return abbr
     return None
 

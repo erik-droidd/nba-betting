@@ -14,6 +14,11 @@ class Team(Base):
     name = Column(String(50), nullable=False)
     conference = Column(String(4))  # East / West
     current_elo = Column(Float, default=1500.0)
+    # Split offensive / defensive Elo (Tier 1.3 — Neil-Paine style).
+    # Tracked alongside the legacy aggregate `current_elo` for back-compat;
+    # the aggregate is recomputed as (off + def) / 2 on every update.
+    current_elo_off = Column(Float, default=1500.0)
+    current_elo_def = Column(Float, default=1500.0)
 
 
 class Game(Base):
@@ -67,6 +72,14 @@ class EloRating(Base):
     game_id = Column(String(20), ForeignKey("games.id"))
     elo_before = Column(Float, nullable=False)
     elo_after = Column(Float, nullable=False)
+    # Off/def Elo snapshots (Tier 1.3). Nullable for back-compat with rows
+    # written before the migration — the feature builder treats NULL as
+    # "fall back to the aggregate Elo for both off and def" so old data
+    # still produces sane (if less granular) features.
+    elo_off_before = Column(Float)
+    elo_off_after = Column(Float)
+    elo_def_before = Column(Float)
+    elo_def_after = Column(Float)
 
 
 class PlayerStat(Base):

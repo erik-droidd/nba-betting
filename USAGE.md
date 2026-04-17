@@ -19,7 +19,7 @@ pip install -e .
 
 ### 2. Load Historical Data
 
-Fetch 3 seasons of NBA game data from NBA.com and compute Elo ratings. This takes several minutes due to API rate limiting (2.5s per call).
+Fetch 3 seasons of NBA game data from NBA.com and compute Elo ratings. This takes several minutes due to API rate limiting (1.5s per call).
 
 ```bash
 python3 -m nba_betting sync --seasons 3
@@ -38,12 +38,13 @@ python3 -m nba_betting train
 ```
 
 This will:
-- Build a feature matrix (60 features: rolling stats, Four Factors, **points-against / net rating / Pythagorean expectation**, rest days, Elo)
-- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries
+- Build a feature matrix (~92 features: rolling stats, Four Factors, **SOS-adjusted net rating**, **pace/possessions**, **EWM-weighted stats**, **off/def Elo split**, Pythagorean expectation, rest days, Elo)
+- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries — **with per-fold hyperparameter grid search** (max_depth, learning_rate, max_iter, regularization); best params saved to `trained_models/best_params.joblib`
 - Report accuracy, Brier score, and log loss per fold
 - Train the final model on all data
 - **Calibrate probabilities via isotonic regression** (replaces Platt sigmoid, which over-compressed tails on the ~54% home-win base rate)
 - **Grid-search the optimal Elo-vs-GBM ensemble weight** by minimizing log-loss on the calibration fold — the learned weight is saved to `trained_models/ensemble_weight.joblib` and reloaded automatically at prediction time
+- When sufficient out-of-fold data is available, fit a **stacked logistic meta-learner** on [elo_logit, gbm_logit, |disagreement|] and save it to `trained_models/ensemble_meta.joblib`; falls back to the log-odds blend otherwise
 - Save all model artifacts to `trained_models/`
 
 **Expected output**: ~63-65% walk-forward accuracy, Brier score ~0.223, calibrated ECE ~0.00-0.02.
@@ -82,12 +83,12 @@ This is the main command. It will:
 3. Sync injuries from ESPN (automatic — ~150 players tracked)
 4. Fetch market odds from Polymarket (filters out closed/resolved markets) and ESPN/DraftKings as fallback
 5. Snapshot odds for line movement tracking
-6. Run the ensemble model (Elo + calibrated GBM, blended in **log-odds space** with a weight learned during training)
+6. Run the ensemble model (Elo + calibrated GBM, blended in **log-odds space** with a weight learned during training; stacked meta-learner used when available)
 7. **Apply injury adjustments** to the raw model probability (each injured player reduces team strength based on their impact rating)
 8. **Bayesian-shrink** the injury-adjusted model probability toward the market log-odds (λ = 0.6 by default — market-leaning). This is the single biggest change to how the system filters bets: small model-vs-market disagreements get pulled back to the market, and only decisive conviction survives.
 9. Compute edge against the **shrunken** probability (not the raw model) — so model%, market%, and edge% reconcile exactly in the UI
 10. Apply the **asymmetric bet-side floor** (`MIN_BET_SIDE_PROB = 0.30`): the system refuses to bet a team the model itself only gives a <30% chance of winning, even if the edge math looks positive. This kills "lottery-ticket" bets where positive EV depends on a tail price the model isn't really contradicting.
-11. Size bets using quarter-Kelly criterion
+11. Size bets using **signal-dependent quarter-Kelly** (fraction scales with edge magnitude) and **slate-level portfolio Kelly** (accounts for correlated same-day bets via Gaussian copula; falls back to per-bet Kelly when only 1 bet)
 12. Display recommendations with explanations (the explanation prefers feature signals that *agree* with the bet; if every surface stat contradicts the bet, it says so honestly rather than parroting misleading reasoning)
 
 **Output columns**:
@@ -190,6 +191,8 @@ python3 -m nba_betting snapshot-odds
 
 Records a point-in-time snapshot of current Polymarket + ESPN odds for today's games in the `odds_snapshots` database table. The model uses consecutive snapshots to compute three features: `spread_movement`, `prob_movement`, and `odds_disagreement` (Polymarket vs ESPN). These features have zero signal until at least two snapshots exist for a game.
 
+Snapshots are **automatically deduplicated**: if prices haven't moved by more than 0.5% since the last snapshot within 4 hours, the row is skipped, so running this frequently is safe.
+
 **Run this on a cron every 30–60 minutes during the season** (e.g. `*/30 * * * * cd "NBA Betting" && .venv/bin/python -m nba_betting snapshot-odds`). After ~30 days of snapshots the `odds_disagreement` feature becomes meaningful for retraining.
 
 > **Note**: odds snapshots accumulate forward — historical games in the training set have these features set to 0.0. The model learns to use them only when they're non-zero (i.e., live season data).
@@ -222,7 +225,16 @@ python3 -m nba_betting performance   # Shows accuracy, ROI, calibration
 - **Bet Win Rate**: % of placed bets that won
 - **Total Wagered / Profit / ROI**: Dollar amounts and return on investment
 - **Max Drawdown**: Worst peak-to-trough decline
+- **Closing Line Value (CLV)**: Average logit-delta between your bet price and the closing price — the gold-standard skill metric (positive = beating the closing line)
 - **Calibration Check**: Predicted vs actual win rates by probability bin (should be close to diagonal)
+
+### Closing Line Value
+
+```bash
+python3 -m nba_betting clv
+```
+
+Shows a per-bet CLV breakdown: your bet price, the closing Polymarket price, the logit delta, and whether each bet beat the line. Includes a rolling average CLV and a t-statistic (the statistical measure of whether your CLV is meaningfully positive). CLV is the fastest way to validate betting skill — 50 bets of positive CLV is statistically significant, whereas ROI needs hundreds.
 
 ### Backtesting (Historical Simulation)
 
@@ -299,10 +311,15 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 ### Run the Test Suite
 
 ```bash
-cd "NBA Betting" && .venv/bin/python -m pytest tests/test_new_features.py -v
+cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-16 fast unit tests covering: shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence. Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
+45 fast unit tests across three test files:
+- **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
+- **`test_improvements.py`** (15): rolling stats, Four Factors, Elo accuracy.
+- **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
+
+Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
 
 ### Common Issues
 
@@ -366,12 +383,13 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Before games | `predict` | Get today's recommendations |
 | Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron |
 | After games | `sync` then `performance` | Check results and accuracy |
+| After games | `clv` | Review Closing Line Value skill metric |
 | Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
 | Monthly | `train` | Retrain model with latest data |
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/test_new_features.py -v` | Guard against silent regressions |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (45 tests) |
 
 ---
 
@@ -403,6 +421,8 @@ trained_models/
   feature_cols.joblib       # Feature column order
   feature_means.joblib      # Training means for NaN imputation
   ensemble_weight.joblib    # Grid-searched optimal Elo weight for log-odds blend
+  best_params.joblib        # Best hyperparameters found during per-fold grid search
+  ensemble_meta.joblib      # Stacked logistic meta-learner (present after sufficient WF data)
 ```
 
 ---
@@ -429,14 +449,15 @@ python3 -m nba_betting backtest --bankroll 5000 --splits 3   # Custom bankroll /
 
 # Performance & analysis
 python3 -m nba_betting elo                       # Current Elo standings
-python3 -m nba_betting performance               # Historical accuracy + ROI
+python3 -m nba_betting performance               # Historical accuracy + ROI + CLV
+python3 -m nba_betting clv                       # Per-bet Closing Line Value breakdown
 python3 -m nba_betting simulate                  # Monte Carlo bankroll simulation
 python3 -m nba_betting simulate --n-sims 50000
 
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/test_new_features.py -v             # 16 unit tests (run after any code change)
+pytest tests/ -v                                 # 45 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN

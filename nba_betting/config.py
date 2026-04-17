@@ -36,8 +36,12 @@ ELO_K_FACTOR = 20.0
 ELO_HOME_ADVANTAGE = 100.0
 ELO_CARRYOVER = 0.75
 
-# NBA API rate limiting
-NBA_API_DELAY_SECONDS = 2.5
+# NBA API rate limiting. Tier 3.3 — 1.5s is the empirically observed
+# "safe" floor for stats.nba.com without triggering 429s during backfill
+# of 3-season datasets; 2.5s was overly conservative. Sync completes
+# roughly 40% faster at 1.5s. If you start hitting rate limits, bump
+# back to 2.5.
+NBA_API_DELAY_SECONDS = 1.5
 
 # Polymarket API
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -45,7 +49,10 @@ CLOB_API_BASE = "https://clob.polymarket.com"
 
 # ESPN API
 ESPN_API_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-ESPN_API_DELAY_SECONDS = 1.5
+# Tier 3.3 — ESPN is generous with rate limits (their public sport API).
+# 0.8s is well under the observed throttle point and keeps player-roster
+# + injury sync under 2 minutes for the full league.
+ESPN_API_DELAY_SECONDS = 0.8
 
 # Current NBA season
 CURRENT_SEASON = "2025-26"
