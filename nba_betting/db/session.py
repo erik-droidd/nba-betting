@@ -16,6 +16,13 @@ SessionLocal = sessionmaker(bind=engine)
 _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # (table_name, column_name, column_ddl_type)
     ("odds_snapshots", "game_id", "VARCHAR(20)"),
+    # Tier 1.3 — split off/def Elo on Team and EloRating.
+    ("teams", "current_elo_off", "FLOAT"),
+    ("teams", "current_elo_def", "FLOAT"),
+    ("elo_ratings", "elo_off_before", "FLOAT"),
+    ("elo_ratings", "elo_off_after", "FLOAT"),
+    ("elo_ratings", "elo_def_before", "FLOAT"),
+    ("elo_ratings", "elo_def_after", "FLOAT"),
 ]
 
 

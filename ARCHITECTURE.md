@@ -22,7 +22,7 @@ reintroduce.
              │  (games,     │    │  (odds)      │    │  (injuries,  │
              │   stats)     │    │              │    │   odds, ATS) │
              └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-                    │ 2.5s rate-limit   │                    │ 1.5s rate-limit
+                    │ 1.5s rate-limit   │                    │ 0.8s rate-limit
                     ▼                   ▼                    ▼
              ┌───────────────────────────────────────────────────────┐
   STORAGE    │  SQLite (data/nba_betting.db)                         │
@@ -35,15 +35,17 @@ reintroduce.
              ┌───────────────────────────────────────────────────────┐
   FEATURES   │  compute_rolling_features → add_four_factors →       │
              │  add_rest_features → build_feature_matrix             │
-             │  (60 diff-features, all computed with shift(1) to     │
-             │   prevent temporal leakage)                           │
+             │  (~92 diff-features: rolling stats, SOS-adjusted      │
+             │   net rating, pace/poss, EWM, off/def Elo — all       │
+             │   computed with shift(1) to prevent temporal leakage) │
              └───────────────────────────┬───────────────────────────┘
                                          │
                                          ▼
              ┌───────────────────────────────────────────────────────┐
-  MODELS     │  Elo  +  HistGradientBoosting (calibrated isotonic)  │
+  MODELS     │  Elo (+ off/def split) + HistGradientBoosting        │
+             │          (calibrated isotonic, per-fold grid search)  │
              │          │                                            │
-             │          └─> log-odds ensemble with learned weight    │
+             │          └─> meta-learner → log-odds ensemble fallback│
              └───────────────────────────┬───────────────────────────┘
                                          │  p_model
                                          ▼
@@ -63,7 +65,9 @@ reintroduce.
   BET        │  edge = p_shrunk / p_market - 1                      │
   FILTER     │  gate 1: edge ≥ MIN_EDGE_THRESHOLD (2%)               │
              │  gate 2: p_shrunk ≥ MIN_BET_SIDE_PROB (0.30)          │
-             │  size  = quarter-Kelly, capped at 5% bankroll         │
+             │  size  = signal-dependent Kelly × slate portfolio opt  │
+             │          (Gaussian copula correlation, SLSQP solver,  │
+             │           fallback to per-bet quarter-Kelly if 1 bet) │
              └───────────────────────────┬───────────────────────────┘
                                          │
                                          ▼
@@ -97,7 +101,9 @@ nba_betting/
 │   │                              ⚠ Never uses live ScoreBoard() — it caches
 │   │                                 stale prior-day data for hours after rollover.
 │   ├── polymarket.py           — Gamma + CLOB clients. Filters closed markets
-│   │                              and extreme (<1%, >99%) prices.
+│   │                              and extreme (<1%, >99%) prices. Fuzzy
+│   │                              substring fallback in _name_to_abbr()
+│   │                              catches non-standard title formats.
 │   ├── espn.py                 — ESPN client: scoreboard, injuries, depth
 │   │                              charts, rosters, team summaries.
 │   │                              Handles ESPN abbr ↔ NBA abbr mapping.
@@ -111,13 +117,21 @@ nba_betting/
 │   ├── player_stats.py         — Roster + depth chart sync into PlayerStat.
 │   └── odds_tracker.py         — snapshot_current_odds / get_line_movement
 │                                 (opening-vs-current spread & prob).
+│                                 Auto-deduplicates: skips snapshot if
+│                                 prices moved < 0.5% within a 4h window.
 │
 ├── features/
 │   ├── rolling.py              — Per-team-game rolling means (5/10/20).
 │   │                              Uses shift(1) to exclude the current game
 │   │                              (NO LEAKAGE). Computes pts_against /
 │   │                              net_rtg_game with vectorized np.where.
+│   │                              Also attaches opp_elo per row (SOS),
+│   │                              poss (possessions ≈ FGA+0.44FTA+TOV),
+│   │                              adj_net_rtg per window (SOS-adjusted),
+│   │                              and EWM stats (halflife=10, shift(1)).
 │   ├── four_factors.py         — eFG%, TOV%, ORB%, FT-rate (Dean Oliver).
+│   │                              opp_dreb now vectorized via groupby
+│   │                              transform (no per-row apply).
 │   ├── rest_days.py            — rest_days, is_b2b, games_last_7/14.
 │   ├── player_impact.py        — ESPN-driven player features (starter out,
 │   │                              missing minutes %, available-talent diff).
@@ -130,28 +144,51 @@ nba_betting/
 │
 ├── models/
 │   ├── elo.py                  — 538-style Elo with home advantage,
-│   │                              MOV multiplier, season carryover.
-│   │                              get_current_elos() reads the latest
-│   │                              EloRating row per team.
+│   │                              MOV multiplier (× opponent-strength
+│   │                              sigmoid), season carryover, and a
+│   │                              parallel off/def Elo split.
+│   │                              get_current_elos() and
+│   │                              get_current_off_def_elos() read the
+│   │                              latest EloRating rows per team.
 │   ├── xgboost_model.py        — HistGradientBoostingClassifier wrapper
 │   │                              (name kept for historical reasons).
 │   │                              Saves/loads (estimator, feature_cols).
 │   │                              Also persists feature_means for NaN
 │   │                              imputation at prediction time.
+│   │                              Per-fold hyperparameter grid search
+│   │                              (max_depth/lr/iter/l2); best params
+│   │                              saved to best_params.joblib.
+│   │                              Mtime-keyed in-process model cache.
 │   ├── calibration.py          — Isotonic calibration via
 │   │                              CalibratedClassifierCV(cv="prefit").
 │   │                              Defaults to 'isotonic' — see §6.
 │   │                              Uses FrozenEstimator for sklearn ≥ 1.8.
-│   └── ensemble.py             — Log-odds (logit-space) blend of Elo and
-│                                 GBM probs, with a grid-searched weight
+│   │                              Mtime-keyed in-process cache.
+│   ├── stacking.py             — Logistic regression meta-learner trained
+│   │                              on out-of-fold [elo_logit, gbm_logit,
+│   │                              |disagreement|]. Saved to
+│   │                              ensemble_meta.joblib; absent = fallback
+│   │                              to log-odds blend.
+│   └── ensemble.py             — blend_predictions(): prefers meta-learner
+│                                 when ensemble_meta.joblib is present,
+│                                 falls back to log-odds (logit-space)
+│                                 blend with a grid-searched weight
 │                                 persisted to ensemble_weight.joblib.
 │
 ├── betting/
 │   ├── edge.py                 — compute_edge, is_positive_ev, and
 │   │                              confidence_badge (STRONG/MODERATE/LEAN/
 │   │                              SUSPECT thresholds).
-│   ├── kelly.py                — kelly_fraction + compute_bet_size
-│   │                              (quarter-Kelly, 5% cap).
+│   ├── kelly.py                — kelly_fraction + compute_bet_size.
+│   │                              signal_dependent_lambda() scales the
+│   │                              Kelly fraction by edge/CLV/disagreement
+│   │                              factors (clamped 0.25×–1.25× base).
+│   ├── portfolio.py            — optimize_slate(): slate-level Kelly via
+│   │                              scipy SLSQP with a Gaussian copula
+│   │                              correlation model. Falls back to
+│   │                              haircut per-bet Kelly for 1 bet.
+│   │                              build_simple_correlation() provides
+│   │                              the default same-day +0.05 ρ matrix.
 │   ├── shrinkage.py            — shrink_to_market (Bayesian log-odds
 │   │                              shrinkage). The single most important
 │   │                              change in the whole system — see §6.
@@ -169,7 +206,10 @@ nba_betting/
 │   ├── montecarlo.py           — Monte Carlo bankroll simulation (resample
 │   │                              from backtest results).
 │   └── tracker.py              — record_predictions + update_results
-│                                 for prediction_history.json.
+│                                 for prediction_history.json. Also stores
+│                                 bet_market_prob_at_pick for CLV tracking;
+│                                 update_closing_lines() fills clv_logit
+│                                 from the latest pre-tipoff snapshot.
 │
 ├── display/
 │   └── console.py              — Rich-based terminal tables + panels.
@@ -320,7 +360,55 @@ Morey's empirical basketball exponent. Two implementations:
 The diff feature `diff_pyth_roll_w = home_pyth - away_pyth` at each
 window became a top-10 feature in walk-forward permutation importance.
 
-### 4.5 Pivoting to one row per game
+### 4.5 SOS-adjusted rolling stats
+
+`compute_rolling_features()` now also computes `opp_elo_roll_{5,10,20}`:
+the rolling mean of the pre-game Elo of each opponent faced. This is
+merged in from the `EloRating` table using the `game_id` + `opponent_id`
+join so the current game's Elo is never included (shift already handles
+the team's own row; the opponent join is done on the pre-game row).
+
+`adj_net_rtg_roll_{w} = net_rtg / clip(1 + (opp_elo - 1500)/500, 0.5, 1.5)`
+normalises net rating relative to opponent strength. A 15-point win over
+a 1650-Elo team is worth more than the same margin over a 1350-Elo team.
+
+`diff_adj_net_rtg_roll_{w}` and `diff_opp_elo_roll_{w}` are added as
+diff features in `build_feature_matrix()`.
+
+### 4.6 Pace / possessions features
+
+`compute_rolling_features()` computes per-team-game possessions:
+```
+poss = FGA + 0.44·FTA + TOV - OREB
+```
+(clipped at 60 as a sanity floor). This is rolled over 5/10/20 windows
+with shift(1). `matchup_pace_{w} = (home_poss_roll_{w} + away_poss_roll_{w}) / 2`
+captures the expected tempo of a specific matchup.
+
+### 4.7 EWM rolling stats
+
+`rolling_ewm(series, halflife=10.0)` applies `shift(1).ewm(halflife=10).mean()`
+so recent form is weighted exponentially more than older games. Two EWM
+stats are currently added: `net_rtg_game_ewm_10` and `plus_minus_ewm_10`.
+The diff feature `diff_net_rtg_game_ewm_10` ranked #2 in permutation
+importance after training on the expanded feature set.
+
+### 4.8 Off/def Elo features
+
+`EloRating` now stores `elo_off_before` and `elo_def_before` per game
+(populated by `compute_all_elos()` which runs the parallel off/def split
+alongside the aggregate Elo). `build_feature_matrix()` joins these and
+exposes:
+- `home_elo_off`, `home_elo_def`, `away_elo_off`, `away_elo_def`
+- `elo_off_diff = home_elo_off - away_elo_off`
+- `elo_def_diff = home_elo_def - away_elo_def`
+- `home_off_vs_away_def = home_elo_off - away_elo_def` (matchup quality)
+- `away_off_vs_home_def = away_elo_off - home_elo_def`
+
+Columns fill from the aggregate Elo when off/def rows are absent (e.g.,
+before the first backfill run), so training is stable across schema versions.
+
+### 4.9 Pivoting to one row per game
 
 `build_feature_matrix()` splits the long-format rolling DataFrame into
 `home_stats` and `away_stats`, renames columns with `home_`/`away_`
@@ -331,6 +419,8 @@ prefixes, and merges on `game_id`. Then it computes:
 - **Diff features**: `diff_{stat}_roll_{w}` for every stat and window.
 - **Pythagorean diffs** for each window via the vectorized helper.
 - **Rest diff**: `home_rest_days - away_rest_days`.
+- **SOS / pace / EWM diffs**: as described in §4.5–4.7.
+- **Off/def Elo features**: as described in §4.8.
 
 The final model-feature list is assembled in `builder.py::build_feature_matrix()`
 step 8 as `model_features` and is stored to `feature_cols.joblib` by the
@@ -354,10 +444,23 @@ training path so inference can round-trip it.
 
 538-style Elo:
 - K-factor `ELO_K_FACTOR = 20`, home bonus `ELO_HOME_ADVANTAGE = 100`.
-- MOV multiplier (Elo Auto-corrects for blowouts vs. Elo difference).
+- MOV multiplier dampened by an **opponent-strength sigmoid**:
+  `opp_factor = 1 / (1 + exp(-(elo_loser - elo_winner) / 200))`. A 30-point
+  blowout over a weak opponent inflates ratings less than the same margin
+  over a contender.
 - Season carryover `ELO_CARRYOVER = 0.75` applied at the season boundary
   (`compute_all_elos()` detects season changes).
 - `get_current_elos()` reads the latest `EloRating` per team.
+
+**Off/def Elo split** (`update_off_def_elo()`): alongside the aggregate
+Elo, each team's offensive Elo is updated from points scored vs the
+opponent's defensive Elo (and vice versa). The residual is normalised by
+a 12-point scale (`PTS_PER_ELO = 0.05`, `k_split = k × 0.5`). This lets
+the model distinguish a high-scoring team with a porous defence from a
+balanced team with the same aggregate Elo.
+
+`get_current_off_def_elos()` returns `{team_id: (elo_off, elo_def)}` and
+is called by `api/routes.py` for live predictions.
 
 `expected_score(elo_a, elo_b) = 1 / (1 + 10^((elo_b - elo_a) / 400))`
 matches the Bradley-Terry formulation. In the feature builder this is
@@ -370,6 +473,15 @@ vectorized; for the live prediction it's called directly per-team.
   it handles NaN natively and trains faster on this scale.
 - Walk-forward validation with July 1 season boundaries
   (`walk_forward_validate()`).
+- **Per-fold hyperparameter grid search** (`search_hyperparams()`): each
+  WF fold runs an 8-combo grid over `max_depth ∈ {4,5}`,
+  `learning_rate ∈ {0.03,0.05}`, `max_iter ∈ {300,500}`, and
+  `l2_regularization ∈ {0,0.1}`, picking the combo with best held-out
+  log-loss on a 15% calibration slice. Best params saved to
+  `trained_models/best_params.joblib` and reloaded for final training.
+- **Mtime-keyed in-process cache**: `load_model()` and `load_feature_means()`
+  skip disk reads if the artifact hasn't changed since last load — saves
+  ~50ms per repeated API call.
 - Permutation feature importance with `neg_log_loss` scoring is more
   honest than sklearn's built-in `feature_importances_`, which can be
   misleading for tree models.
@@ -387,9 +499,17 @@ tail-compression.
 Uses `CalibratedClassifierCV(cv="prefit")` wrapped in `FrozenEstimator`
 (required for sklearn ≥ 1.8, which removed direct prefit support).
 
-### 5.4 Ensemble (`models/ensemble.py`)
+### 5.4 Ensemble (`models/ensemble.py` + `models/stacking.py`)
 
-**Log-odds (logit-space) blending**, not naive probability averaging:
+**Primary path — stacked meta-learner** (`models/stacking.py`):
+When `trained_models/ensemble_meta.joblib` exists, `blend_predictions()`
+uses a logistic regression meta-learner trained on out-of-fold
+`[logit(p_elo), logit(p_gbm), |logit(p_elo) - logit(p_gbm)|]`. It learns
+per-region weights automatically — e.g., trusting Elo more when models
+strongly agree, GBM more in mid-range uncertainty. Falls back gracefully
+to the log-odds blend when the artifact is absent.
+
+**Fallback — log-odds (logit-space) blending**:
 
 ```python
 z = w_elo · logit(p_elo) + (1 - w_elo) · logit(p_gbm)
@@ -406,7 +526,36 @@ signal.
 `w_elo ∈ [0.0, 0.1, ..., 1.0]` on the calibration fold, pick the one
 minimizing `sklearn.metrics.log_loss`. Persisted to
 `trained_models/ensemble_weight.joblib` and reloaded at prediction
-time. Typical learned value: ~0.5.
+time. Typical learned value: ~0.3 (GBM-leaning after expanded features).
+
+### 5.5 Bet sizing (`betting/kelly.py` + `betting/portfolio.py`)
+
+**Signal-dependent Kelly fraction** (`signal_dependent_lambda()`): the base
+Kelly fraction is scaled by three factors derived from the current bet signal:
+
+- `edge_factor`: scales 0.6× for lean edges (2-3%), up to 1.0× for strong
+  (5-15%), and tapers back to 0.5× for suspect (>15%) signals.
+- `clv_factor`: scales 1.15× when CLV t-stat > 1.5 (model historically
+  beats the closing line), 0.7× when CLV < -1 (model historically fades).
+- `disagree_factor`: scales 0.85× when model-market logit gap is large,
+  0.65× when extreme — extra caution when conviction is based on outlier
+  disagreement.
+
+The composite is clamped to `[0.25×, 1.25×]` of the base `KELLY_FRACTION`.
+
+**Slate-level portfolio Kelly** (`optimize_slate()`): when multiple bets
+are recommended on the same slate, they are sized jointly rather than
+independently. A `scipy.optimize.minimize(SLSQP)` solver maximises
+`E[log(1 + Σ fᵢ·rᵢ)]` (approximated via Gaussian copula Monte Carlo)
+subject to `Σ fᵢ ≤ MAX_EXPOSURE_PCT` and `0 ≤ fᵢ ≤ MAX_BET_PCT`.
+`build_simple_correlation()` provides the default correlation matrix
+(same-day off-diagonal ρ = 0.05). Falls back to haircut per-bet Kelly
+when only one bet is passed or the solver fails to converge.
+
+**Closing Line Value (CLV)** is tracked per bet: `bet_market_prob_at_pick`
+is stored by `record_predictions()`, and `update_closing_lines()` fills
+`clv_logit = bet_logit - close_logit` once the game closes. The `clv`
+CLI command reports per-bet CLV and a t-statistic over the rolling window.
 
 ---
 
@@ -540,8 +689,8 @@ Everything worth tuning is in one file. The most impactful knobs:
 | `ELO_K_FACTOR` | `20.0` | Elo update speed |
 | `ELO_HOME_ADVANTAGE` | `100.0` | Home bonus in Elo points |
 | `ELO_CARRYOVER` | `0.75` | Season-to-season Elo persistence |
-| `NBA_API_DELAY_SECONDS` | `2.5` | NBA.com rate limit |
-| `ESPN_API_DELAY_SECONDS` | `1.5` | ESPN rate limit |
+| `NBA_API_DELAY_SECONDS` | `1.5` | NBA.com rate limit (reduced from 2.5) |
+| `ESPN_API_DELAY_SECONDS` | `0.8` | ESPN rate limit (reduced from 1.5) |
 
 ---
 
@@ -556,7 +705,7 @@ from nba_betting.features.builder import build_feature_matrix
 X, y = build_feature_matrix()
 print(X.shape, 'NaN?', X.isna().any().any())
 "
-# Expect: ~(3500+, 60), NaN? False
+# Expect: ~(3500+, 92), NaN? False
 
 # 2. Scalar and vectorized Pythagorean agree
 .venv/bin/python3 -c "
@@ -578,14 +727,19 @@ print('OK')
 # 5. Walk-forward still in the expected range
 .venv/bin/python3 -m nba_betting train
 # Expect: WF accuracy 63-65%, Brier ~0.223, calibrated ECE < 0.02
+# New features (EWM, SOS-adj, pace, off/def Elo) should appear in top-10
+# permutation importance.
 
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Unit tests for the hardening pass (shrinkage, drivers, spreads,
-#    backtest defaults, migration idempotence).
-.venv/bin/python3 -m pytest tests/test_new_features.py -v
-# Expect: 16 passed in < 2s.
+# 7. Full test suite (45 tests across three files).
+.venv/bin/python3 -m pytest tests/ -v
+# Expect: 45 passed in < 5s.
+# test_new_features.py    — 16 tests (shrinkage, drivers, spreads, migration)
+# test_improvements.py    — 15 tests (rolling stats, Four Factors, Elo)
+# test_tier_improvements.py — 14 tests (off/def Elo, EWM, meta-learner,
+#   signal-dependent Kelly, portfolio Kelly, dedup, fuzzy matching, cache)
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -764,6 +918,57 @@ Follow-on fixes to the 10.1 items after a post-implementation audit:
   (cutoff: 30 days). Nudges the user toward retraining once both
   streams have enough variation.
 
+### 10.1b Prediction engine & efficiency improvements (2026-04)
+
+Three tiers of improvements shipped after the hardening pass:
+
+**Tier 1 — Prediction quality:**
+- **SOS-adjusted rolling net rating** — `adj_net_rtg_roll_{5,10,20}` in
+  `features/rolling.py`. Divides net rating by a strength-of-schedule
+  multiplier derived from rolling mean opponent Elo. Exposed as
+  `diff_adj_net_rtg_roll_{w}` in the model feature set.
+- **Pace / possessions** — `poss_roll_{5,10,20}` per team and
+  `matchup_pace_{w}` (home + away average). Possessions approximated as
+  `FGA + 0.44·FTA + TOV - OREB`.
+- **EWM rolling stats** — `rolling_ewm(halflife=10)` with shift(1) on
+  `net_rtg_game` and `plus_minus`. `diff_net_rtg_game_ewm_10` became
+  the #2 permutation-importance feature after retraining.
+- **Off/def Elo split** — parallel offensive/defensive Elo updated via
+  `update_off_def_elo()`. Schema migration adds `elo_off_before/after`
+  and `elo_def_before/after` to `EloRating`, `current_elo_off/def` to
+  `Team`. Exposes four matchup-aware diff features (see §4.8, §5.1).
+- **Opponent-strength MOV dampening** — `opp_strength_factor()` sigmoid
+  multiplied into the MOV multiplier so blowouts over weak opponents
+  inflate ratings less (see §5.1).
+
+**Tier 2 — Model architecture & bet sizing:**
+- **Per-fold hyperparameter grid search** — 8-combo grid inside each WF
+  fold; best params reused for final training (see §5.2).
+- **Stacked meta-learner** — logistic regression on out-of-fold logits;
+  present as `ensemble_meta.joblib`, falls back to log-odds blend (see §5.4).
+- **CLV tracking** — `bet_market_prob_at_pick` stored per prediction;
+  `update_closing_lines()` computes `clv_logit` post-game. `clv` CLI
+  command and `performance` table both surface CLV t-stat.
+- **Slate-level portfolio Kelly** — joint SLSQP optimization with
+  Gaussian copula correlation for correlated same-day bets (see §5.5).
+- **Signal-dependent Kelly fraction** — edge/CLV/disagreement scaling
+  of the base Kelly multiplier, clamped to `[0.25×, 1.25×]` (see §5.5).
+
+**Tier 3 — Efficiency:**
+- **Mtime-keyed model cache** — `load_model()`, `load_feature_means()`,
+  and `load_calibrated_model()` cache in-process and only reload on
+  artifact change. Saves ~50ms per API call.
+- **Vectorized Four Factors** — `opp_dreb` computed via `groupby`
+  transform instead of per-row apply (3-5× speedup on full history).
+- **Vectorized injury impact** — `build_feature_matrix()` merges injury
+  impact via pandas merge instead of list comprehension.
+- **API rate limits reduced** — `NBA_API_DELAY_SECONDS` 2.5→1.5,
+  `ESPN_API_DELAY_SECONDS` 1.5→0.8 (well under observed throttle points).
+- **Odds snapshot deduplication** — `_is_duplicate()` skips write if
+  prices moved < 0.5% within a 4h window; safe to run on tight crons.
+- **Polymarket fuzzy fallback** — `_name_to_abbr()` tries exact match
+  then falls back to ordered substring containment for non-standard titles.
+
 ### 10.2 Remaining caveats
 
 - **Real-odds coverage is bootstrapping** — `snapshot-odds` only
@@ -776,6 +981,14 @@ Follow-on fixes to the 10.1 items after a post-implementation audit:
   learns to treat that as "unknown, average" but the feature will only
   become truly predictive once it has a season or two of real data
   under it.
+- **Meta-learner requires WF data to train** — `ensemble_meta.joblib`
+  is only produced when there are sufficient out-of-fold folds. On a
+  fresh install with limited history, the system silently falls back to
+  the log-odds blend. This is intentional — a meta-learner on 1 fold
+  would overfit badly.
+- **CLV bootstrapping** — `clv_logit` is only populated after a bet
+  resolves AND the odds snapshot collector captured a closing price. The
+  CLV t-stat becomes meaningful after ~30 bets with closing-line data.
 - **Driver attribution is not exact Shapley** — it ignores feature
   interactions, so on trees with strong split dependencies the top
   driver can be slightly off. Good enough to cite in a sentence; don't

@@ -5,8 +5,25 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import select
 
-from nba_betting.db.models import Game, GameStats, Team
+from nba_betting.config import INITIAL_ELO
+from nba_betting.db.models import EloRating, Game, GameStats, Team
 from nba_betting.db.session import get_session
+
+
+def rolling_ewm(series: pd.Series, halflife: float = 10.0) -> pd.Series:
+    """Exponential-decay rolling mean (Tier 1.5).
+
+    Uses ``shift(1)`` to exclude the current observation (no-leakage), then
+    an exponentially weighted mean with the given halflife. The default
+    halflife of 10 games means a game from a month ago contributes ~25%
+    of the weight of last night's game — useful for catching mid-season
+    form shifts (trades, lineup changes) that uniform 5/10/20 windows are
+    slow to register.
+
+    Returned series is aligned to the input index. NaN where insufficient
+    history.
+    """
+    return series.shift(1).ewm(halflife=halflife, min_periods=2).mean()
 
 
 def _load_game_stats_df() -> pd.DataFrame:
@@ -60,6 +77,25 @@ def _load_game_stats_df() -> pd.DataFrame:
         session.close()
 
 
+def _load_pre_game_elo_df() -> pd.DataFrame:
+    """Per (game_id, team_id) → opponent's pre-game Elo (Tier 1.1 SOS).
+
+    Used to compute rolling mean opponent Elo per team, which then anchors
+    SOS-adjusted net rating. Returns empty DataFrame if Elo hasn't been
+    computed yet — the caller falls back to INITIAL_ELO.
+    """
+    session = get_session()
+    try:
+        rows = session.execute(
+            select(EloRating.game_id, EloRating.team_id, EloRating.elo_before)
+        ).all()
+    finally:
+        session.close()
+    if not rows:
+        return pd.DataFrame(columns=["game_id", "team_id", "elo_before"])
+    return pd.DataFrame(rows, columns=["game_id", "team_id", "elo_before"])
+
+
 def compute_rolling_features(windows: tuple[int, ...] = (5, 10, 20)) -> pd.DataFrame:
     """Compute rolling averages of key stats per team.
 
@@ -84,12 +120,50 @@ def compute_rolling_features(windows: tuple[int, ...] = (5, 10, 20)) -> pd.DataF
     df["pts_for"] = df["pts"]
     df["net_rtg_game"] = df["pts_for"] - df["pts_against"]
 
-    # Stats to compute rolling averages for
+    # Tier 1.1 — attach opponent's pre-game Elo per row. We compute this
+    # by self-joining the (game_id → team→elo_before) mapping. If Elo
+    # hasn't been backfilled yet (cold start) we default to INITIAL_ELO so
+    # downstream SOS features are neutral rather than NaN.
+    elo_df = _load_pre_game_elo_df()
+    if not elo_df.empty:
+        # opponent_id per row
+        df["opponent_id"] = np.where(
+            df["team_id"] == df["home_team_id"],
+            df["away_team_id"],
+            df["home_team_id"],
+        )
+        df = df.merge(
+            elo_df.rename(columns={"team_id": "opponent_id", "elo_before": "opp_elo"}),
+            on=["game_id", "opponent_id"],
+            how="left",
+        )
+        df["opp_elo"] = df["opp_elo"].fillna(INITIAL_ELO)
+        df = df.drop(columns=["opponent_id"], errors="ignore")
+    else:
+        df["opp_elo"] = INITIAL_ELO
+
+    # Tier 1.2 — pace per team-game (possessions). We need opponent's
+    # rebounding context to estimate possessions accurately, but a clean
+    # standalone approximation is fine for a rolling-window predictor:
+    # poss ≈ FGA + 0.44*FTA + TOV - OREB. Average team plays ~100/game.
+    df["poss"] = (
+        df["fga"].astype(float)
+        + 0.44 * df["fta"].astype(float)
+        + df["tov"].astype(float)
+        - df["oreb"].astype(float)
+    ).clip(lower=60.0)  # floor sanity-checks against bad scrape data
+
+    # Stats to compute rolling averages for. Tier 1.1 adds ``opp_elo`` so
+    # each team gets a rolling mean strength-of-schedule signal, and Tier
+    # 1.2 adds ``poss`` so the model sees recent possessions-per-game
+    # (pace). Both are used downstream to build SOS-adjusted net rating
+    # and a pace-differential feature.
     stat_cols = [
         "pts", "pts_against", "net_rtg_game",
         "fg_pct", "fg3_pct", "ft_pct",
         "oreb", "dreb", "reb", "ast", "stl", "blk", "tov",
         "plus_minus", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta",
+        "opp_elo", "poss",
     ]
 
     # Sort by team and date for proper rolling
@@ -117,6 +191,34 @@ def compute_rolling_features(windows: tuple[int, ...] = (5, 10, 20)) -> pd.DataF
                     .mean()
                 )
                 team_df[f"{col}_roll_{window}"] = rolled
+
+        # --- Tier 1.1: SOS-adjusted net rating ---
+        # The raw rolling net_rtg treats a +10 stretch vs tanking teams the
+        # same as +10 vs contenders. We divide by a strength-of-schedule
+        # multiplier derived from the team's recent mean opponent Elo:
+        #   adj_net = net_rtg / (1 + (opp_elo - 1500) / 500)
+        # A team whose recent opponents averaged Elo=1600 gets its net
+        # rating *boosted* (denominator < 1), and vice versa for weak
+        # opponents. The 500-point scale roughly spans the NBA's realistic
+        # Elo range around the mean.
+        for window in windows:
+            net_col = f"net_rtg_game_roll_{window}"
+            opp_col = f"opp_elo_roll_{window}"
+            if net_col in team_df.columns and opp_col in team_df.columns:
+                sos_denom = 1.0 + (team_df[opp_col] - 1500.0) / 500.0
+                # Guard against zero/negative denominators at extreme
+                # schedule edges (shouldn't happen in practice with NBA
+                # Elo ranges, but defensive code wins).
+                sos_denom = sos_denom.clip(lower=0.5, upper=1.5)
+                team_df[f"adj_net_rtg_roll_{window}"] = team_df[net_col] / sos_denom
+
+        # --- Tier 1.5: Exponentially-weighted "recent form" features ---
+        # Halflife 10 games puts most weight on the last 2 weeks of play.
+        # Complements the uniform 5/10/20-window rolls by reacting faster
+        # to lineup changes and hot/cold streaks without throwing away
+        # older context entirely.
+        team_df["net_rtg_game_ewm_10"] = rolling_ewm(team_df["net_rtg_game"], halflife=10.0)
+        team_df["plus_minus_ewm_10"] = rolling_ewm(team_df["plus_minus"], halflife=10.0)
 
         # --- Back-to-back 3PT cold streak (#8 improvement) ---
         # Teams shoot ~1.5% worse from 3 on the second night of a B2B.

@@ -222,6 +222,102 @@ def walk_forward_validate(
     return {"folds": fold_results, "aggregate": aggregate}
 
 
+def search_hyperparams(
+    X: pd.DataFrame,
+    y: pd.Series,
+    grid: list[dict] | None = None,
+    n_splits: int = 3,
+    metric: str = "log_loss_calibrated",
+) -> dict:
+    """Tier 2.1 — grid-search hyperparameters via walk-forward validation.
+
+    Each grid point is a full override dict (merged on top of DEFAULT_PARAMS),
+    evaluated end-to-end with ``walk_forward_validate``. The best config is
+    selected by minimizing ``metric`` on the aggregate across folds — by
+    default the calibrated log-loss (falls back to raw log_loss if per-fold
+    calibration was skipped). Grid is intentionally small (8 combos) to
+    keep runtime bounded on a ~6k-row training set.
+
+    Returns:
+        {"best_params": {...}, "best_score": float, "all_results": [...]}.
+        The caller writes ``best_params`` into config / persists them so
+        subsequent ``train_model`` calls pick them up.
+    """
+    if grid is None:
+        # Compact grid spanning depth / LR / iter / regularization. All
+        # combos produce models in ~15 seconds each on the full history.
+        grid = [
+            {"max_depth": 3, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
+            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
+            {"max_depth": 5, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
+            {"max_depth": 4, "learning_rate": 0.03, "max_iter": 500, "l2_regularization": 1.0},
+            {"max_depth": 4, "learning_rate": 0.08, "max_iter": 200, "l2_regularization": 1.0},
+            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 0.5},
+            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 2.0},
+            {"max_depth": 3, "learning_rate": 0.08, "max_iter": 200, "l2_regularization": 0.5},
+        ]
+
+    results = []
+    best_score = float("inf")
+    best_params: dict | None = None
+
+    for i, overrides in enumerate(grid):
+        params = {**DEFAULT_PARAMS, **overrides}
+        try:
+            wf = walk_forward_validate(X, y, n_splits=n_splits, params=params)
+        except Exception as e:
+            results.append({"overrides": overrides, "error": str(e)})
+            continue
+
+        agg = wf.get("aggregate") or {}
+        # Prefer calibrated log-loss; fall back to raw if calibration was
+        # skipped (small fold → not enough data for isotonic).
+        score = agg.get(metric)
+        if score is None:
+            score = agg.get("log_loss", float("inf"))
+
+        entry = {
+            "overrides": overrides,
+            "score": round(float(score), 4),
+            "aggregate": agg,
+        }
+        results.append(entry)
+
+        if score < best_score:
+            best_score = float(score)
+            best_params = params
+
+    # Fallback if every grid point errored
+    if best_params is None:
+        best_params = DEFAULT_PARAMS.copy()
+
+    return {
+        "best_params": best_params,
+        "best_score": round(best_score, 4) if best_score != float("inf") else None,
+        "all_results": results,
+    }
+
+
+BEST_PARAMS_PATH = MODELS_DIR / "best_hyperparams.joblib"
+
+
+def save_best_hyperparams(params: dict) -> Path:
+    """Persist grid-search-winning hyperparams so ``train`` can pick them up."""
+    MODELS_DIR.mkdir(exist_ok=True)
+    joblib.dump(params, BEST_PARAMS_PATH)
+    return BEST_PARAMS_PATH
+
+
+def load_best_hyperparams() -> dict | None:
+    """Load grid-search-winning hyperparams. Returns None if not saved yet."""
+    if not BEST_PARAMS_PATH.exists():
+        return None
+    try:
+        return joblib.load(BEST_PARAMS_PATH)
+    except Exception:
+        return None
+
+
 def save_model(
     model: HistGradientBoostingClassifier,
     feature_cols: list[str],
@@ -236,20 +332,64 @@ def save_model(
     return MODEL_PATH
 
 
-def load_model() -> tuple[HistGradientBoostingClassifier, list[str]] | None:
-    """Load trained model and feature columns. Returns None if not found."""
+def _file_mtime(path: Path) -> float:
+    """Return file mtime, or 0 if missing — used as a cache invalidation key."""
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+# Tier 3.1 — in-memory cache keyed by file mtime. The API route previously
+# re-joblib-loaded the GBM (and feature means) on every request; that's a
+# ~200–500ms disk hit per prediction. We cache them as module-level
+# globals and invalidate automatically when the artifact is retrained
+# (mtime changes).
+_MODEL_CACHE: dict[str, object] = {}
+_MEANS_CACHE: dict[str, object] = {}
+
+
+def load_model(force_reload: bool = False) -> tuple[HistGradientBoostingClassifier, list[str]] | None:
+    """Load trained model and feature columns. Returns None if not found.
+
+    Cached in-process: the same Python process will only deserialize the
+    model once per mtime. Pass ``force_reload=True`` to bypass the cache
+    (useful from CLI train-followed-by-predict flows).
+    """
     if not MODEL_PATH.exists() or not FEATURE_COLS_PATH.exists():
         return None
+
+    model_mtime = _file_mtime(MODEL_PATH)
+    cols_mtime = _file_mtime(FEATURE_COLS_PATH)
+    cache_key = (model_mtime, cols_mtime)
+
+    cached = _MODEL_CACHE.get("value")
+    if not force_reload and cached is not None and _MODEL_CACHE.get("key") == cache_key:
+        return cached  # type: ignore[return-value]
+
     model = joblib.load(MODEL_PATH)
     feature_cols = joblib.load(FEATURE_COLS_PATH)
-    return model, feature_cols
+    payload = (model, feature_cols)
+    _MODEL_CACHE["value"] = payload
+    _MODEL_CACHE["key"] = cache_key
+    return payload
 
 
-def load_feature_means() -> dict[str, float] | None:
-    """Load saved feature means for prediction imputation. Returns None if not found."""
+def load_feature_means(force_reload: bool = False) -> dict[str, float] | None:
+    """Load saved feature means for prediction imputation. Returns None if not found.
+
+    Cached in-process like ``load_model``.
+    """
     if not FEATURE_MEANS_PATH.exists():
         return None
-    return joblib.load(FEATURE_MEANS_PATH)
+    mtime = _file_mtime(FEATURE_MEANS_PATH)
+    cached = _MEANS_CACHE.get("value")
+    if not force_reload and cached is not None and _MEANS_CACHE.get("key") == mtime:
+        return cached  # type: ignore[return-value]
+    means = joblib.load(FEATURE_MEANS_PATH)
+    _MEANS_CACHE["value"] = means
+    _MEANS_CACHE["key"] = mtime
+    return means
 
 
 def get_feature_importance(

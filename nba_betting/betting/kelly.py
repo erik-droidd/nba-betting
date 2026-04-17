@@ -11,11 +11,84 @@ from __future__ import annotations
 from nba_betting.config import KELLY_FRACTION, MAX_BET_PCT, MAX_EXPOSURE_PCT
 
 
+def signal_dependent_lambda(
+    base_lambda: float,
+    edge: float,
+    clv_tstat: float | None = None,
+    model_market_disagreement: float | None = None,
+) -> float:
+    """Tier 2.5 — scale base Kelly fraction by signal strength.
+
+    The static quarter-Kelly assumes every bet is equally informative.
+    In reality, a 2% edge on a game the model agrees with the market on
+    (i.e., edge came from a small price inefficiency) is qualitatively
+    different from a 8% edge where the model strongly disagrees — the
+    latter has more idiosyncratic risk and should be sized somewhat
+    smaller despite the higher edge point estimate.
+
+    This function multiplies ``base_lambda`` by three soft factors:
+
+    - **edge_factor**: taper aggressively beyond ~10% edges (suspicious
+      territory — usually mispriced odds or stale lines).
+    - **clv_factor**: amplify lambda when we have measurable CLV skill
+      (t-stat > 1.5). If CLV is negative, shrink it.
+    - **disagreement_factor**: shrink lambda when the model and market
+      strongly disagree (|prob_diff| > 0.15) — high idiosyncratic risk.
+
+    Returns a lambda in ``[base_lambda * 0.25, base_lambda * 1.25]`` so
+    the signal scaling can at most quarter or 1.25x the static rate.
+    """
+    # Edge taper: multiplicative Gaussian around the sweet spot at 4-5%.
+    # The static lambda fully applies in the 2–8% band; beyond ~15% it
+    # tapers toward 0.5x to guard against mispriced lines.
+    if edge <= 0:
+        return base_lambda * 0.5
+    if edge < 0.02:
+        edge_factor = 0.6  # barely-there edge
+    elif edge <= 0.08:
+        edge_factor = 1.0
+    elif edge <= 0.12:
+        edge_factor = 0.9
+    elif edge <= 0.20:
+        edge_factor = 0.75
+    else:
+        edge_factor = 0.5
+
+    # CLV factor: if we have no CLV history (bootstrap phase), leave
+    # unchanged. Otherwise reward a positive-t-stat and penalize negative.
+    if clv_tstat is None:
+        clv_factor = 1.0
+    elif clv_tstat >= 1.5:
+        clv_factor = 1.15
+    elif clv_tstat <= -1.5:
+        clv_factor = 0.7
+    else:
+        clv_factor = 1.0
+
+    # Disagreement factor: if |edge| > 0.15 and the model strongly
+    # disagrees with the market the idiosyncratic risk is higher.
+    if model_market_disagreement is None:
+        disagree_factor = 1.0
+    elif abs(model_market_disagreement) >= 0.20:
+        disagree_factor = 0.65
+    elif abs(model_market_disagreement) >= 0.15:
+        disagree_factor = 0.85
+    else:
+        disagree_factor = 1.0
+
+    scaled = base_lambda * edge_factor * clv_factor * disagree_factor
+    # Clamp to ±quarter of the base so a single-game signal can't blow up sizing.
+    lo = base_lambda * 0.25
+    hi = base_lambda * 1.25
+    return max(lo, min(hi, scaled))
+
+
 def kelly_fraction(
     prob: float,
     market_price: float,
     lambda_: float = KELLY_FRACTION,
     drawdown_mult: float = 1.0,
+    clv_tstat: float | None = None,
 ) -> float:
     """Compute fractional Kelly bet size as fraction of bankroll.
 
@@ -26,6 +99,9 @@ def kelly_fraction(
         drawdown_mult: Multiplier applied to the fractional Kelly output
             after all other math. 1.0 = normal sizing. <1.0 = shrink
             after recent drawdown. See ``compute_drawdown_multiplier``.
+        clv_tstat: Optional CLV t-statistic for Tier 2.5 signal-dependent
+            sizing. When provided, lambda is scaled up/down based on
+            demonstrated closing-line-value skill.
 
     Returns:
         Recommended bet as fraction of bankroll (0 to MAX_BET_PCT).
@@ -44,7 +120,16 @@ def kelly_fraction(
     if full_kelly <= 0:
         return 0.0
 
-    fractional = lambda_ * full_kelly * max(0.0, min(1.0, drawdown_mult))
+    # Tier 2.5 — scale lambda by signal strength when we have the inputs.
+    edge = prob - market_price
+    effective_lambda = signal_dependent_lambda(
+        lambda_,
+        edge=edge,
+        clv_tstat=clv_tstat,
+        model_market_disagreement=edge,
+    )
+
+    fractional = effective_lambda * full_kelly * max(0.0, min(1.0, drawdown_mult))
     return min(fractional, MAX_BET_PCT)
 
 
@@ -54,9 +139,10 @@ def compute_bet_size(
     market_price: float,
     lambda_: float = KELLY_FRACTION,
     drawdown_mult: float = 1.0,
+    clv_tstat: float | None = None,
 ) -> float:
     """Compute dollar bet size."""
-    fraction = kelly_fraction(prob, market_price, lambda_, drawdown_mult)
+    fraction = kelly_fraction(prob, market_price, lambda_, drawdown_mult, clv_tstat=clv_tstat)
     return round(bankroll * fraction, 2)
 
 

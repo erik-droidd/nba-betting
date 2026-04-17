@@ -627,6 +627,22 @@ def performance() -> None:
     table.add_row("Current Bankroll", f"${perf['current_bankroll']:.2f}")
     table.add_row("Max Drawdown", f"{perf['max_drawdown']:.1%}")
 
+    # Tier 2.3 — show CLV metrics alongside ROI. Avg CLV > 0 with a
+    # t-stat ≥ 1.5 is the gold-standard signal that the model has real
+    # pricing edge, independent of single-bet outcome variance.
+    avg_clv = perf.get("avg_clv")
+    clv_t = perf.get("clv_tstat")
+    clv_n = perf.get("clv_count", 0)
+    if avg_clv is not None:
+        clv_color = "green" if avg_clv > 0 else "red"
+        table.add_row(
+            "Avg CLV",
+            f"[{clv_color}]{avg_clv:+.2%}[/{clv_color}] (n={clv_n})",
+        )
+        if clv_t is not None:
+            t_color = "green" if clv_t >= 1.5 else ("yellow" if clv_t >= 0 else "red")
+            table.add_row("CLV t-stat", f"[{t_color}]{clv_t:+.2f}[/{t_color}]")
+
     console.print(table)
 
     # Show calibration bins if available
@@ -648,6 +664,101 @@ def performance() -> None:
                 f"[{gap_color}]{gap:.1%}[/{gap_color}]",
             )
         console.print(cal_table)
+
+
+@app.command()
+def clv(limit: int = 20) -> None:
+    """Show recent Closing Line Value detail (Tier 2.3).
+
+    Surfaces per-bet CLV — how the price you bet at compared to the
+    closing line. Sustained positive CLV is the strongest evidence of
+    real modelling edge; ROI can stay negative for months on pure
+    variance even when CLV is good.
+    """
+    from rich.table import Table
+    from nba_betting.betting.tracker import load_history, update_results, compute_performance
+
+    # Make sure closing lines are pulled in first.
+    update_results()
+
+    history = load_history()
+    bets_with_clv = [r for r in history if r.clv is not None and r.bet_side != "NO BET"]
+    if not bets_with_clv:
+        console.print("[yellow]No CLV data yet.[/yellow]")
+        console.print(
+            "[dim]CLV requires at least two odds snapshots per game "
+            "(one before tipoff, one after). Run `snapshot-odds` "
+            "periodically to build history.[/dim]"
+        )
+        return
+
+    # Sort by most recent first
+    recent = sorted(bets_with_clv, key=lambda r: r.date, reverse=True)[:limit]
+
+    table = Table(title=f"Recent CLV (last {len(recent)} bets)", show_header=True, header_style="bold cyan")
+    table.add_column("Date")
+    table.add_column("Game")
+    table.add_column("Side")
+    table.add_column("Bet Price", justify="right")
+    table.add_column("Close Price", justify="right")
+    table.add_column("CLV", justify="right")
+    table.add_column("Result", justify="center")
+
+    for r in recent:
+        # Bet-side specific prices
+        if r.bet_side == "HOME":
+            bet_price = r.market_home_prob
+            close_price = r.closing_market_prob
+        else:
+            bet_price = 1.0 - r.market_home_prob if r.market_home_prob else None
+            close_price = (
+                1.0 - r.closing_market_prob if r.closing_market_prob else None
+            )
+
+        clv_color = "green" if r.clv > 0 else "red"
+        if r.profit is None:
+            result_str = "[dim]pending[/dim]"
+        elif r.profit > 0:
+            result_str = "[green]W[/green]"
+        elif r.profit < 0:
+            result_str = "[red]L[/red]"
+        else:
+            result_str = "-"
+
+        table.add_row(
+            r.date,
+            f"{r.away_team}@{r.home_team}",
+            r.bet_side,
+            f"{bet_price:.1%}" if bet_price else "-",
+            f"{close_price:.1%}" if close_price else "-",
+            f"[{clv_color}]{r.clv:+.2%}[/{clv_color}]",
+            result_str,
+        )
+
+    console.print(table)
+
+    # Aggregate at the bottom — same numbers as `performance`.
+    perf = compute_performance()
+    avg_clv = perf.get("avg_clv")
+    clv_t = perf.get("clv_tstat")
+    clv_n = perf.get("clv_count", 0)
+    if avg_clv is not None:
+        summary = Table(title="CLV Summary", show_header=False)
+        summary.add_column("Metric")
+        summary.add_column("Value", justify="right")
+        clv_color = "green" if avg_clv > 0 else "red"
+        summary.add_row("Sample size", str(clv_n))
+        summary.add_row("Average CLV", f"[{clv_color}]{avg_clv:+.2%}[/{clv_color}]")
+        if clv_t is not None:
+            t_color = "green" if clv_t >= 1.5 else ("yellow" if clv_t >= 0 else "red")
+            summary.add_row("t-statistic", f"[{t_color}]{clv_t:+.2f}[/{t_color}]")
+            if clv_t >= 1.5:
+                summary.add_row("Interpretation", "[green]Significant positive edge[/green]")
+            elif clv_t >= 0:
+                summary.add_row("Interpretation", "[yellow]Neutral / not yet significant[/yellow]")
+            else:
+                summary.add_row("Interpretation", "[red]Negative CLV — model may lack edge[/red]")
+        console.print(summary)
 
 
 @app.command()
@@ -1079,7 +1190,8 @@ def commands() -> None:
         ("python3 -m nba_betting train", "Train GBM model + calibrate"),
         ("python3 -m nba_betting predict", "Today's recommendations + explanations"),
         ("python3 -m nba_betting elo", "Current Elo standings"),
-        ("python3 -m nba_betting performance", "Historical accuracy + ROI"),
+        ("python3 -m nba_betting performance", "Historical accuracy + ROI + CLV"),
+        ("python3 -m nba_betting clv", "Per-bet Closing Line Value detail"),
         ("python3 -m nba_betting backtest", "Simulate strategy on historical data"),
         ("python3 -m nba_betting simulate", "Monte Carlo bankroll simulation"),
         ("python3 -m nba_betting diagnose", "Validate prediction pipeline"),

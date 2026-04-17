@@ -116,3 +116,35 @@ def load_ensemble_weight() -> float:
         return float(joblib.load(ENSEMBLE_WEIGHT_PATH))
     except Exception:
         return DEFAULT_ELO_WEIGHT
+
+
+def blend_predictions(
+    elo_prob,
+    xgb_prob,
+    context: dict | None = None,
+) -> float | np.ndarray:
+    """Tier 2.2 — unified blend entry point.
+
+    Prefers the stacked meta-learner if one is saved; otherwise falls
+    back to the log-odds grid-search blender. Accepts scalars or arrays
+    and returns the corresponding shape.
+
+    Callers that want to force the legacy blender can use
+    ``ensemble_predict`` / ``ensemble_predict_batch`` directly.
+    """
+    from nba_betting.models.stacking import load_meta_model, predict_meta
+
+    artifact = load_meta_model()
+    if artifact is not None:
+        try:
+            proba = predict_meta(elo_prob, xgb_prob, context=context, artifact=artifact)
+            # Preserve scalar-in / scalar-out
+            if np.ndim(elo_prob) == 0:
+                return float(proba[0])
+            return proba
+        except Exception:
+            pass  # Fall back to the legacy blender on any meta-model error.
+
+    if np.ndim(elo_prob) == 0:
+        return ensemble_predict(float(elo_prob), float(xgb_prob))
+    return ensemble_predict_batch(np.asarray(elo_prob), np.asarray(xgb_prob))

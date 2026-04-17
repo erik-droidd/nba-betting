@@ -110,8 +110,25 @@ def save_calibrated_model(model: CalibratedClassifierCV) -> Path:
     return CALIBRATED_MODEL_PATH
 
 
-def load_calibrated_model() -> CalibratedClassifierCV | None:
-    """Load calibrated model. Returns None if not found."""
+_CALIBRATED_CACHE: dict[str, object] = {}
+
+
+def load_calibrated_model(force_reload: bool = False) -> CalibratedClassifierCV | None:
+    """Load calibrated model. Returns None if not found.
+
+    Tier 3.1 — cached in-process, keyed by file mtime. Automatically
+    invalidates when the artifact is retrained.
+    """
     if not CALIBRATED_MODEL_PATH.exists():
         return None
-    return joblib.load(CALIBRATED_MODEL_PATH)
+    try:
+        mtime = CALIBRATED_MODEL_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    cached = _CALIBRATED_CACHE.get("value")
+    if not force_reload and cached is not None and _CALIBRATED_CACHE.get("key") == mtime:
+        return cached  # type: ignore[return-value]
+    model = joblib.load(CALIBRATED_MODEL_PATH)
+    _CALIBRATED_CACHE["value"] = model
+    _CALIBRATED_CACHE["key"] = mtime
+    return model
