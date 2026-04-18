@@ -1,0 +1,3 @@
+# Directory populated by the snapshot-odds GitHub Actions workflow.
+# Each run appends one line per (game, source) to YYYY-MM-DD.jsonl
+# (UTC day). Import locally via `python3 -m nba_betting import-snapshots`.
