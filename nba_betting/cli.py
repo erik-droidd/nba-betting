@@ -962,12 +962,57 @@ def backtest(
 def simulate(
     n_sims: int = typer.Option(10_000, help="Number of Monte Carlo simulations"),
     bankroll: float = typer.Option(DEFAULT_BANKROLL, help="Starting bankroll"),
+    mode: str = typer.Option(
+        "both",
+        help=(
+            "Simulation mode: 'empirical' resamples real backtest outcomes "
+            "(honest bootstrap — preserves the actual win rate). "
+            "'market_right' assumes the market price is the true probability "
+            "(pessimistic efficient-market null). "
+            "'both' runs both side-by-side for comparison."
+        ),
+    ),
+    real_odds: bool = typer.Option(
+        False,
+        "--real-odds",
+        help=(
+            "Use real closing-line snapshots from odds_snapshots as the market "
+            "price in the backtest (instead of the Elo proxy). Passes through "
+            "to run_backtest(use_real_odds=...)."
+        ),
+    ),
 ) -> None:
-    """Run Monte Carlo simulation of bankroll evolution."""
+    """Run Monte Carlo simulation of bankroll evolution.
+
+    Uses **empirical bootstrap** over the backtest's realized bets by
+    default — i.e. each simulated bet draws a real historical
+    ``(p_model, p_market, won)`` tuple from the backtest output. This
+    preserves the actually-observed win rate rather than the model's
+    self-reported probability, which was the bug in the original
+    implementation (it simulated ``won ~ Bernoulli(p_model)`` — a
+    tautology that produced fictional trillion-dollar bankrolls).
+
+    The optional ``market_right`` mode assumes the efficient-market
+    null: each bet's outcome is drawn from ``Bernoulli(p_market)``. If
+    the bankroll drifts down under this mode, it confirms our positive
+    ROI in the empirical mode comes from real edge over the market
+    (not an artifact of Kelly compounding). A positive gap between
+    empirical and market-null median ROI is the diagnostic.
+
+    See ``nba_betting/betting/montecarlo.py`` docstring for the
+    full rationale behind the rewrite.
+    """
     from nba_betting.features.builder import build_feature_matrix
     from nba_betting.betting.backtest import run_backtest
     from nba_betting.betting.montecarlo import simulate_bankroll
     from rich.table import Table
+
+    if mode not in {"empirical", "market_right", "both"}:
+        console.print(
+            f"[red]Invalid mode {mode!r}. Use 'empirical', 'market_right', "
+            f"or 'both'.[/red]"
+        )
+        raise typer.Exit(1)
 
     console.print("[bold]Building feature matrix...[/bold]")
     X, y = build_feature_matrix()
@@ -977,7 +1022,7 @@ def simulate(
         raise typer.Exit(1)
 
     console.print("[bold]Running backtest to get bet distribution...[/bold]")
-    bt = run_backtest(X, y, bankroll=bankroll)
+    bt = run_backtest(X, y, bankroll=bankroll, use_real_odds=real_odds)
     bets = bt["bets"]
 
     if not bets:
@@ -986,40 +1031,130 @@ def simulate(
 
     model_probs = [b["model_prob"] for b in bets]
     market_probs = [b["market_prob"] for b in bets]
+    won_outcomes = [bool(b["won"]) for b in bets]
 
-    console.print(f"[bold]Running {n_sims:,} Monte Carlo simulations ({len(bets)} bets each)...[/bold]")
-    results = simulate_bankroll(
-        model_probs, market_probs,
-        n_simulations=n_sims,
-        initial_bankroll=bankroll,
+    realized_wr = sum(won_outcomes) / len(won_outcomes)
+    claimed_wr = sum(model_probs) / len(model_probs)
+    console.print(
+        f"[dim]Backtest: {len(bets)} bets, realized win rate "
+        f"{realized_wr:.3f}, model-claimed avg prob {claimed_wr:.3f} "
+        f"(gap {realized_wr - claimed_wr:+.3f}).[/dim]"
     )
 
-    table = Table(title="Monte Carlo Results", show_header=True, header_style="bold cyan")
-    table.add_column("Metric")
-    table.add_column("Value", justify="right")
+    modes_to_run = (
+        ["empirical", "market_right"] if mode == "both" else [mode]
+    )
 
-    table.add_row("Simulations", f"{results['n_simulations']:,}")
-    table.add_row("Bets per Sim", str(results["n_bets_per_sim"]))
-    table.add_row("", "")
-    table.add_row("Median Final Bankroll", f"${results['median_final_bankroll']:.2f}")
-    table.add_row("Mean Final Bankroll", f"${results['mean_final_bankroll']:.2f}")
-    table.add_row("5th Percentile", f"${results['pct_5']:.2f}")
-    table.add_row("25th Percentile", f"${results['pct_25']:.2f}")
-    table.add_row("75th Percentile", f"${results['pct_75']:.2f}")
-    table.add_row("95th Percentile", f"${results['pct_95']:.2f}")
-    table.add_row("", "")
-    table.add_row("P(Profit)", f"{results['probability_of_profit']:.1%}")
-    table.add_row("P(Ruin)", f"{results['probability_of_ruin']:.1%}")
-    table.add_row("Median ROI", f"{results['median_roi']:+.1%}")
-    table.add_row("Median Max Drawdown", f"{results['median_max_drawdown']:.1%}")
-    table.add_row("Worst Max Drawdown", f"{results['worst_max_drawdown']:.1%}")
+    all_results: dict[str, dict] = {}
+    for m in modes_to_run:
+        console.print(
+            f"[bold]Running {n_sims:,} MC sims ({len(bets)} bets each) — "
+            f"mode={m}...[/bold]"
+        )
+        all_results[m] = simulate_bankroll(
+            model_probs, market_probs,
+            won_outcomes=won_outcomes,
+            mode=m,
+            n_simulations=n_sims,
+            initial_bankroll=bankroll,
+        )
+
+    table = Table(
+        title="Monte Carlo Results",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Metric")
+    headers = {
+        "empirical": "Empirical (real outcomes)",
+        "market_right": "Market-is-right (null)",
+    }
+    for m in modes_to_run:
+        table.add_column(headers[m], justify="right")
+
+    def col(key: str, fmt) -> list[str]:
+        return [fmt(all_results[m][key]) for m in modes_to_run]
+
+    as_dollars = lambda v: f"${v:,.2f}"
+    as_pct = lambda v: f"{v:.1%}"
+    as_pct_signed = lambda v: f"{v:+.1%}"
+    # Per-bet log growth stays small (~0.005 for a real 0.5%/bet edge,
+    # ~-0.001 for the market-null), so we show 4 decimals rather than %.
+    as_logret = lambda v: f"{v:+.4f}"
+
+    table.add_row(
+        "Simulations",
+        *[f"{all_results[m]['n_simulations']:,}" for m in modes_to_run],
+    )
+    table.add_row(
+        "Bets per Sim",
+        *[str(all_results[m]["n_bets_per_sim"]) for m in modes_to_run],
+    )
+    blank = ["" for _ in modes_to_run]
+    table.add_row("", *blank)
+    table.add_row("Median Final Bankroll", *col("median_final_bankroll", as_dollars))
+    table.add_row("Mean Final Bankroll", *col("mean_final_bankroll", as_dollars))
+    table.add_row("5th Percentile", *col("pct_5", as_dollars))
+    table.add_row("25th Percentile", *col("pct_25", as_dollars))
+    table.add_row("75th Percentile", *col("pct_75", as_dollars))
+    table.add_row("95th Percentile", *col("pct_95", as_dollars))
+    table.add_row("", *blank)
+    table.add_row("P(Profit)", *col("probability_of_profit", as_pct))
+    table.add_row("P(Ruin)", *col("probability_of_ruin", as_pct))
+    table.add_row("Median ROI", *col("median_roi", as_pct_signed))
+    table.add_row("Median Max Drawdown", *col("median_max_drawdown", as_pct))
+    table.add_row("Worst Max Drawdown", *col("worst_max_drawdown", as_pct))
+    table.add_row("", *blank)
+    # Horizon-invariant metric — the cleanest statement of skill. Doesn't
+    # explode with n_bets the way compounded bankroll does. Positive gap
+    # between empirical and market-null is the honest edge signal.
+    table.add_row(
+        "Median Log-Growth / Bet", *col("median_log_growth_per_bet", as_logret)
+    )
+    table.add_row(
+        "Mean Log-Growth / Bet", *col("mean_log_growth_per_bet", as_logret)
+    )
 
     console.print(table)
 
-    if results['probability_of_ruin'] > 0.1:
-        console.print("[red]WARNING: High ruin probability. Consider reducing bet sizing.[/red]")
-    if results['probability_of_profit'] > 0.6:
-        console.print(f"[green]Strategy is profitable in {results['probability_of_profit']:.0%} of simulations.[/green]")
+    emp = all_results.get("empirical")
+    mkt = all_results.get("market_right")
+
+    if emp is not None:
+        if emp["probability_of_ruin"] > 0.1:
+            console.print(
+                "[red]WARNING: empirical ruin probability > 10%. "
+                "Lower the Kelly fraction or raise the edge threshold.[/red]"
+            )
+        if emp["probability_of_profit"] > 0.6:
+            console.print(
+                f"[green]Empirical: profitable in "
+                f"{emp['probability_of_profit']:.0%} of paths.[/green]"
+            )
+    if mkt is not None and emp is not None:
+        # Horizon-invariant gap: doesn't blow up with n_bets the way
+        # median_roi does. Expect ~+0.005 for a real edge, ~0 or negative
+        # under the null. The compounded numbers above are honest Kelly
+        # math but look absurd; this is the per-bet statement of skill.
+        log_gap = (
+            emp["median_log_growth_per_bet"]
+            - mkt["median_log_growth_per_bet"]
+        )
+        roi_gap = emp["median_roi"] - mkt["median_roi"]
+        console.print(
+            f"[dim]Edge vs market-null: log-growth/bet gap = "
+            f"{log_gap:+.4f} (~{log_gap * 100:+.2f}% per bet). "
+            f"Compounded median-ROI gap = {roi_gap:+.1%} over "
+            f"{emp['n_bets_per_sim']} bets. Positive gap is evidence of "
+            f"real edge (not just Kelly compounding).[/dim]"
+        )
+    if not real_odds:
+        console.print(
+            "[yellow]Note: backtest used the Elo proxy as 'market' (no "
+            "historical Polymarket coverage). Rerun with --real-odds "
+            "once odds_snapshots has coverage for the eval window for a "
+            "live-equivalent simulation.[/yellow]"
+        )
 
 
 @app.command(name="snapshot-odds")
