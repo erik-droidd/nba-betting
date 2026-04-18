@@ -1,0 +1,120 @@
+name: snapshot-odds
+
+# Runs odds snapshots on GitHub's infrastructure so they keep flowing
+# while the user (Europe-based) is asleep during the NBA overnight
+# window. The runner appends records to a JSONL file under
+# `data/odds_snapshots/` and commits them back to the repo; the user's
+# local machine picks them up with `git pull` and
+# `python3 -m nba_betting import-snapshots`.
+#
+# Cadence: every 30 min from 22:00 UTC through 06:30 UTC. Covers
+#   * ET evening tipoffs (~00:00 UTC / 23:00 UTC during DST)
+#   * West-coast late games (~03:30 UTC wrap)
+#   * A couple of post-tipoff snapshots for line-movement tracking.
+# Explicit `workflow_dispatch` for manual smoke testing from the Actions
+# tab — critical during offseason when cron can't be verified against a
+# real game. See USAGE.md §"Running snapshots remotely" for details.
+#
+# Note on GitHub's 60-day inactivity rule: scheduled workflows are
+# automatically disabled if the repo has no commits for 60 days. NBA
+# offseason (Jun–Oct) easily exceeds this. We mitigate in two ways:
+#   1. The workflow pushes a commit each day it runs, keeping activity
+#      visible.
+#   2. USAGE.md documents the manual re-enable step for the first run
+#      after offseason.
+
+on:
+  schedule:
+    # Every 30 minutes, 22:00 UTC → 06:30 UTC. Using two ranges keeps
+    # it GitHub-cron compatible (no range crossing midnight).
+    - cron: "0,30 22,23 * * *"
+    - cron: "0,30 0-6 * * *"
+  workflow_dispatch:
+    # Manual trigger. Useful for smoke-testing the pipeline end-to-end
+    # before relying on cron, or capturing an ad-hoc snapshot.
+    inputs:
+      note:
+        description: "Optional note (ignored; purely for audit)."
+        required: false
+        default: "manual"
+
+# Required since 2023 — default GITHUB_TOKEN perms became read-only.
+# Write is needed for the commit-back step below.
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize runs so two cron firings (or a manual + cron overlap)
+  # never race on the same JSONL file. `cancel-in-progress: false`
+  # because we'd rather finish the earlier snapshot than drop it.
+  group: snapshot-odds
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need write access + the full ref so we can rebase + push
+          # back. fetch-depth: 0 isn't strictly required but keeps
+          # `git pull --rebase` simple.
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Capture snapshot to JSONL
+        id: capture
+        run: |
+          python -m nba_betting snapshot-odds --jsonl data/odds_snapshots
+          # Record the file we expect to have touched for the commit step.
+          echo "day=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +'%Y-%m-%d %H:%MZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Commit & push
+        env:
+          DAY: ${{ steps.capture.outputs.day }}
+          STAMP: ${{ steps.capture.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # If snapshot-odds wrote nothing (no games / network failure),
+          # don't commit — keeps history clean and avoids empty pushes.
+          if [ -z "$(git status --porcelain data/odds_snapshots/)" ]; then
+            echo "no new snapshot data; nothing to commit"
+            exit 0
+          fi
+
+          git add "data/odds_snapshots/${DAY}.jsonl"
+          # [skip ci] prevents the push from retriggering this workflow.
+          git commit -m "chore(snapshots): ${STAMP} [skip ci]"
+
+          # Rebase-retry loop handles the race where two runs finish
+          # within seconds of each other (shouldn't happen given the
+          # concurrency group, but cheap insurance).
+          for attempt in 1 2 3; do
+            if git pull --rebase origin "${GITHUB_REF_NAME}" && \
+               git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "push succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; retrying"
+            sleep $((attempt * 5))
+          done
+          echo "all push attempts failed"
+          exit 1

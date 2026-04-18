@@ -197,6 +197,34 @@ Snapshots are **automatically deduplicated**: if prices haven't moved by more th
 
 > **Note**: odds snapshots accumulate forward — historical games in the training set have these features set to 0.0. The model learns to use them only when they're non-zero (i.e., live season data).
 
+#### Running Snapshots Remotely (GitHub Actions)
+
+Based in Europe? NBA games tip off between 00:00 and 03:30 UTC — your local machine is asleep. The repo ships a GitHub Actions workflow that runs on GitHub's infrastructure instead. It writes JSONL snapshot records and commits them back to the repo; you `git pull` the next morning and import them locally.
+
+**One-time setup:**
+
+1. Push the repo to GitHub (if not already).
+2. Go to **Repo → Settings → Actions → General → Workflow permissions** and select **"Read and write permissions"**. (The workflow already declares `permissions: contents: write`, but the repo setting is still required.)
+3. Visit the **Actions** tab and confirm the workflow named **snapshot-odds** appears. The first run may need a manual "Enable workflow" click.
+4. Click **Run workflow** → **Run workflow** once to smoke-test end-to-end. You should see a new commit `chore(snapshots): YYYY-MM-DD HH:MMZ [skip ci]` and a file in `data/odds_snapshots/`.
+
+**Daily usage:**
+
+```bash
+git pull                                     # Pull the overnight snapshot commits
+python3 -m nba_betting import-snapshots      # Load JSONL → local odds_snapshots table
+```
+
+`import-snapshots` is **idempotent**: safe to rerun on any cadence, duplicates are detected on `(game_date, home_team_id, away_team_id, source, timestamp)` and skipped. You can also point it at a single file:
+
+```bash
+python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.jsonl
+```
+
+**Cron schedule:** every 30 minutes from 22:00 UTC through 06:30 UTC — covers ET evenings and West Coast late games. See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) to tweak.
+
+> **⚠️ GitHub's 60-day inactivity rule:** scheduled workflows are automatically disabled if the repo has no new commits for 60 days. The NBA offseason (June–October) exceeds this. **First action each October**: visit the Actions tab and re-enable the `snapshot-odds` workflow, then trigger a manual run to verify. The workflow itself commits daily during the season, so mid-season deactivation shouldn't happen.
+
 ### Step 3: Place Bets
 
 Use the recommendations to place bets on Polymarket or your preferred platform. The system recommends quarter-Kelly sizing (conservative) with a 5% max per bet and 25% max total exposure.
@@ -381,7 +409,8 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Start of season | `sync --seasons 3` then `train` | Retrain with fresh data |
 | Daily (morning) | `sync` | Get yesterday's results, update Elo |
 | Before games | `predict` | Get today's recommendations |
-| Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron |
+| Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron (or GitHub Actions — see §Step 2b) |
+| Daily (morning, EU users) | `git pull && import-snapshots` | Pull JSONL snapshots written overnight by GitHub Actions |
 | After games | `sync` then `performance` | Check results and accuracy |
 | After games | `clv` | Review Closing Line Value skill metric |
 | Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
@@ -439,6 +468,8 @@ python3 -m nba_betting sync-players              # Sync player rosters from ESPN
 python3 -m nba_betting predict                   # Today's recommendations + explanations
 python3 -m nba_betting predict --bankroll 5000   # Custom bankroll
 python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on a cron)
+python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, for GitHub Actions
+python3 -m nba_betting import-snapshots          # Load JSONL snapshots (written by GH Actions) into local DB
 
 # Backtesting (four modes)
 python3 -m nba_betting backtest                              # Pure model benchmark (no market odds)

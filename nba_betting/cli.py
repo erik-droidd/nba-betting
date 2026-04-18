@@ -1023,15 +1023,57 @@ def simulate(
 
 
 @app.command(name="snapshot-odds")
-def snapshot_odds() -> None:
+def snapshot_odds(
+    jsonl: str = typer.Option(
+        None,
+        "--jsonl",
+        help=(
+            "Write to a JSONL file instead of the local DB. "
+            "Intended for the GitHub Actions cron runner (the user is in "
+            "Europe and asleep during the NBA overnight window). Use "
+            "`import-snapshots` to load the file into the local DB. "
+            "Pass a directory path; defaults to data/odds_snapshots/."
+        ),
+    ),
+) -> None:
     """Capture a single snapshot of current Polymarket + ESPN odds.
 
-    Designed for cron / launchd scheduling so the odds_snapshots table
-    accumulates a real line-movement history. Typical schedule: every
-    30 minutes between 08:00 and 23:00 local time during the NBA season.
+    Two modes:
+
+    * Default (no flag): writes directly to the local SQLite
+      `odds_snapshots` table. Designed for cron / launchd on the user's
+      own machine.
+    * `--jsonl PATH`: appends one record per (game, source) to a JSONL
+      file under ``PATH`` (a directory; defaults to
+      ``data/odds_snapshots/``). No DB access — designed for the
+      GitHub Actions runner which has no persistent SQLite. Pair with
+      ``import-snapshots`` to load the file back locally.
 
     Exit code 0 always; warnings go to stdout for log parsing.
     """
+    if jsonl is not None:
+        # JSONL mode: DB-free path for the GH Actions cron runner.
+        from nba_betting.data.snapshot_jsonl import (
+            DEFAULT_SNAPSHOT_DIR,
+            capture_snapshot_to_jsonl,
+        )
+
+        out_dir = jsonl if jsonl else str(DEFAULT_SNAPSHOT_DIR)
+        result = capture_snapshot_to_jsonl(out_dir)
+        status = "ok" if not result.get("warnings") else "warn"
+        console.print(
+            f"[{'green' if status == 'ok' else 'yellow'}]"
+            f"snapshot-odds[jsonl] {status}[/] "
+            f"games={result.get('games', 0)} "
+            f"written={result.get('written', 0)} "
+            f"poly={result.get('polymarket_lines', 0)} "
+            f"espn={result.get('espn_lines', 0)} "
+            f"path={result.get('path', '')}"
+        )
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]  warn: {w}[/yellow]")
+        return
+
     from nba_betting.data.odds_tracker import capture_snapshot
     from nba_betting.db.session import init_db
 
@@ -1048,6 +1090,67 @@ def snapshot_odds() -> None:
     )
     for w in result.get("warnings", []):
         console.print(f"[yellow]  warn: {w}[/yellow]")
+
+
+@app.command(name="import-snapshots")
+def import_snapshots(
+    path: str = typer.Option(
+        "data/odds_snapshots",
+        "--path",
+        help=(
+            "Path to a JSONL file or directory produced by "
+            "`snapshot-odds --jsonl`. Defaults to data/odds_snapshots/."
+        ),
+    ),
+) -> None:
+    """Import odds snapshots from JSONL files into the local DB.
+
+    Typical workflow:
+    1. The GitHub Actions cron runner (`snapshot-odds --jsonl`) writes a
+       new file each day and commits it back to the repo.
+    2. You `git pull` on your machine.
+    3. Run `python3 -m nba_betting import-snapshots` to load the new
+       rows into your local SQLite `odds_snapshots` table.
+
+    Idempotent — re-running this against the same file imports 0 rows.
+    Dedup is done on the natural key
+    `(game_date, home_team_id, away_team_id, source, timestamp)`.
+    """
+    from sqlalchemy import select, func
+    from nba_betting.data.snapshot_jsonl import import_snapshots_jsonl
+    from nba_betting.db.models import Team
+    from nba_betting.db.session import get_session, init_db
+
+    init_db()
+    # Fresh-clone guard: without a populated Teams table, every record
+    # falls through the abbr→id lookup and lands in `errors`. Fail fast
+    # with a clear next step instead of letting the user stare at N
+    # "unknown team" warnings.
+    sess = get_session()
+    try:
+        team_count = sess.execute(select(func.count(Team.id))).scalar_one()
+    finally:
+        sess.close()
+    if not team_count:
+        console.print(
+            "[red]Teams table is empty — run `python3 -m nba_betting sync` "
+            "first so team abbreviations can resolve.[/red]"
+        )
+        raise typer.Exit(1)
+
+    result = import_snapshots_jsonl(path)
+    console.print(
+        f"[green]import-snapshots ok[/] "
+        f"files={result['files']} "
+        f"records={result['records']} "
+        f"imported={result['imported']} "
+        f"skipped={result['skipped']} "
+        f"errors={len(result['errors'])}"
+    )
+    for e in result["errors"][:10]:
+        console.print(f"[yellow]  warn: {e}[/yellow]")
+    if len(result["errors"]) > 10:
+        console.print(f"[dim]  ({len(result['errors']) - 10} more errors suppressed)[/dim]")
 
 
 @app.command(name="sync-players")
