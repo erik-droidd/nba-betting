@@ -297,11 +297,52 @@ python3 -m nba_betting backtest --raw-model                      # Pre-calibrati
 To understand the range of possible outcomes:
 
 ```bash
-python3 -m nba_betting simulate
-python3 -m nba_betting simulate --n-sims 50000
+python3 -m nba_betting simulate                         # runs both modes
+python3 -m nba_betting simulate --mode empirical
+python3 -m nba_betting simulate --mode market_right
+python3 -m nba_betting simulate --real-odds --n-sims 50000
 ```
 
-Runs 10,000 (default) simulated seasons by resampling from backtest results. Reports median/percentile bankroll outcomes, probability of profit, and probability of ruin.
+Runs 10,000 (default) simulated seasons by **bootstrapping from the
+backtest's actual resolved bets**. Each simulated bet draws a real
+historical `(p_model, p_market, won)` tuple with replacement — the
+realized win flag is used directly, so the realized win rate is
+preserved. Two modes are reported side-by-side:
+
+- `empirical` (honest): resamples actual outcomes. If the model has
+  edge, you'll see median ROI > 0 here; if not, you won't.
+- `market_right` (pessimistic null): simulates each bet from
+  `Bernoulli(p_market)` — the efficient-market assumption that our
+  model has zero skill. Expected ROI should be ≤ 0. Acts as a
+  sanity floor.
+
+The diagnostic is the **gap** between the two: positive empirical ROI
+combined with non-positive `market_right` ROI is evidence of real
+edge (not just Kelly compounding). The tool prints this gap.
+
+**Read the `Log-Growth / Bet` rows, not the compounded bankrolls.**
+Kelly compounding makes final-bankroll medians balloon with the
+number of bets — a real 0.5%-per-bet edge compounds to ~270,000×
+starting bankroll over 2,000 bets, which is honest math but looks
+absurd. The horizon-invariant per-bet log-return (`Median Log-Growth
+/ Bet`) stays in the same order of magnitude regardless of horizon,
+so it's the cleanest statement of skill. Rough guide:
+
+- `+0.003` to `+0.010` per bet in `empirical` mode → plausible real edge.
+- `0.000` or lower in `market_right` → expected under the efficient-
+  market null. A positive value there would mean our simulator has a
+  bug.
+- The **gap** between empirical and market-null log-growth per bet
+  is what you actually have. The tool prints it directly.
+
+**Note on an earlier bug:** an earlier version of `simulate` flipped
+each bet's outcome with `Bernoulli(p_model)` — a tautology that made
+the model right by construction and produced nonsense medians in the
+trillions with `P(Profit) = 100%`. That path has been removed; see
+[`nba_betting/betting/montecarlo.py`](nba_betting/betting/montecarlo.py)
+for the full rationale. If you see old outputs claiming ~100%
+P(Profit) and ROI in the billions of percent, re-run after pulling
+this fix.
 
 ---
 
@@ -482,7 +523,9 @@ python3 -m nba_betting backtest --bankroll 5000 --splits 3   # Custom bankroll /
 python3 -m nba_betting elo                       # Current Elo standings
 python3 -m nba_betting performance               # Historical accuracy + ROI + CLV
 python3 -m nba_betting clv                       # Per-bet Closing Line Value breakdown
-python3 -m nba_betting simulate                  # Monte Carlo bankroll simulation
+python3 -m nba_betting simulate                  # MC bootstrap (empirical + market-null)
+python3 -m nba_betting simulate --mode empirical # honest bootstrap only
+python3 -m nba_betting simulate --real-odds      # live-equivalent MC
 python3 -m nba_betting simulate --n-sims 50000
 
 # Diagnostics
