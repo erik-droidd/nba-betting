@@ -390,6 +390,13 @@ def test_capture_no_games_still_returns_status(tmp_path, monkeypatch):
         "nba_betting.data.nba_stats.fetch_upcoming_games",
         lambda *a, **kw: [],
     )
+    # Also mock the ESPN fallback added for the datacenter-IP case;
+    # without this the test would reach the real network and either
+    # hang or return a live slate, making it flaky.
+    monkeypatch.setattr(
+        "nba_betting.data.espn.fetch_scoreboard",
+        lambda date_str=None: [],
+    )
 
     out_dir = tmp_path / "captured"
     result = jsonl.capture_snapshot_to_jsonl(
@@ -407,6 +414,201 @@ def test_capture_no_games_still_returns_status(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Timestamp parsing — naive-UTC compatibility with snapshot_current_odds
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# ESPN fallback — the GitHub runner can't hit stats.nba.com (datacenter
+# IPs get silently blocked). ``fetch_todays_games`` returns ``[]``, so
+# capture_snapshot_to_jsonl falls through to ESPN's scoreboard, which
+# is not blocked. These tests pin that behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_capture_falls_back_to_espn_when_nba_api_empty(tmp_path, monkeypatch):
+    """Simulate the GH runner's exact failure mode: nba_api silently
+    returns ``[]`` (datacenter IP block). The capture function must
+    still produce game records by hitting ESPN's scoreboard."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+
+    # nba_api: both fetchers return nothing (datacenter IP block).
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_todays_games",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_upcoming_games",
+        lambda *a, **kw: [],
+    )
+
+    # ESPN scoreboard: returns two scheduled games for the first day
+    # we check. The helper walks today → today+days_ahead, so the
+    # mock returns games on the first call and [] after.
+    espn_games_response = [
+        {
+            "espn_event_id": 401869187,
+            "date": "2026-04-19T23:00Z",
+            "status": "STATUS_SCHEDULED",
+            "home_team": {"espn_id": 2, "abbr": "BOS", "name": "Celtics"},
+            "away_team": {"espn_id": 20, "abbr": "PHI", "name": "76ers"},
+            "odds": {},
+        },
+        {
+            "espn_event_id": 401869188,
+            "date": "2026-04-20T01:00Z",
+            "status": "STATUS_FINAL",  # must be filtered out
+            "home_team": {"espn_id": 25, "abbr": "OKC", "name": "Thunder"},
+            "away_team": {"espn_id": 21, "abbr": "PHX", "name": "Suns"},
+            "odds": {},
+        },
+    ]
+    calls = {"n": 0}
+
+    def fake_fetch_scoreboard(date_str=None):
+        calls["n"] += 1
+        return espn_games_response if calls["n"] == 1 else []
+
+    monkeypatch.setattr(
+        "nba_betting.data.espn.fetch_scoreboard",
+        fake_fetch_scoreboard,
+    )
+    # Odds providers return empty but must not crash — we still want
+    # the games in the slate so we know *which* matchups to snapshot
+    # once odds providers come back online.
+    monkeypatch.setattr(
+        "nba_betting.data.polymarket.get_nba_odds",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn_odds.get_espn_odds",
+        lambda: [],
+    )
+
+    out_dir = tmp_path / "captured"
+    result = jsonl.capture_snapshot_to_jsonl(
+        out_dir,
+        timestamp=datetime(2026, 4, 19, 22, 0, 0),
+    )
+
+    # One game survived the STATUS_SCHEDULED filter.
+    assert result["games"] == 1
+    # No odds providers are mocked with data → no records written,
+    # but the slate was discovered via the ESPN fallback.
+    assert result["source"] == "espn-fallback"
+    # The fallback warning surfaces the datacenter-block hint.
+    assert any("ESPN fallback" in w for w in result["warnings"])
+
+
+def test_capture_prefers_nba_api_when_it_returns_games(tmp_path, monkeypatch):
+    """On the user's local machine nba_api works fine. We must NOT
+    fall back to ESPN in that case — nba_api has authoritative NBA
+    team IDs that match ``games.id`` FKs; ESPN IDs don't."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+
+    fake_games = [{
+        "game_id": "0022500123",
+        "home_team_abbr": "BOS",
+        "away_team_abbr": "LAL",
+        "home_team_id": 1610612738,
+        "away_team_id": 1610612747,
+        "game_time_utc": "2026-04-19T00:00:00Z",
+    }]
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_todays_games",
+        lambda *a, **kw: fake_games,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_upcoming_games",
+        lambda *a, **kw: [],
+    )
+    # Sentinel: if the fallback fires, this raises and the test fails
+    # visibly — better than a silent mismatch in the result dict.
+    def _should_not_be_called(date_str=None):
+        raise AssertionError("ESPN fallback must not fire when nba_api has games")
+    monkeypatch.setattr(
+        "nba_betting.data.espn.fetch_scoreboard",
+        _should_not_be_called,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.polymarket.get_nba_odds",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn_odds.get_espn_odds",
+        lambda: [],
+    )
+
+    result = jsonl.capture_snapshot_to_jsonl(
+        tmp_path / "captured",
+        timestamp=datetime(2026, 4, 18, 22, 0, 0),
+    )
+    assert result["games"] == 1
+    assert result["source"] == "nba-api"
+
+
+def test_espn_fallback_strips_event_id_so_import_is_safe(tmp_path, monkeypatch):
+    """ESPN event IDs (e.g. ``401869187``) are not valid ``games.id``
+    FKs — those use NBA API format (``0022500123``). The fallback must
+    emit an empty/None game_id so imported rows don't create dangling
+    FK references that later confuse the reconcile path."""
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_todays_games",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_upcoming_games",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn.fetch_scoreboard",
+        lambda date_str=None: [{
+            "espn_event_id": 401869187,
+            "date": "2026-04-19T23:00Z",
+            "status": "STATUS_SCHEDULED",
+            "home_team": {"espn_id": 2, "abbr": "BOS", "name": "Celtics"},
+            "away_team": {"espn_id": 13, "abbr": "LAL", "name": "Lakers"},
+            "odds": {},
+        }],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.polymarket.get_nba_odds",
+        lambda: [{
+            "teams": {"BOS": 0.55, "LAL": 0.45},
+            "event_title": "LAL @ BOS",
+        }],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn_odds.get_espn_odds",
+        lambda: [],
+    )
+
+    out_dir = tmp_path / "captured"
+    result = jsonl.capture_snapshot_to_jsonl(
+        out_dir,
+        timestamp=datetime(2026, 4, 19, 22, 0, 0),
+    )
+    assert result["source"] == "espn-fallback"
+    assert result["written"] == 1
+
+    # The JSONL record must have game_id == null (not the ESPN event ID).
+    line = Path(result["path"]).read_text().strip()
+    rec = json.loads(line)
+    assert rec["game_id"] is None
+
+    # Import must succeed and land the row with game_id NULL.
+    imp = jsonl.import_snapshots_jsonl(out_dir)
+    assert imp["imported"] == 1
+    assert imp["errors"] == []
+    from nba_betting.db.models import OddsSnapshot
+    from sqlalchemy import select
+    sess = session_module.get_session()
+    try:
+        row = sess.execute(select(OddsSnapshot)).scalars().one()
+        assert row.game_id is None
+    finally:
+        sess.close()
 
 
 def test_parse_timestamp_drops_tz_to_match_existing_rows():

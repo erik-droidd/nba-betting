@@ -29,14 +29,21 @@ Design notes (locked with advisor):
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
 from nba_betting.db.models import OddsSnapshot, Team
 from nba_betting.db.session import get_session
+
+
+# NBA scheduling timezone. Used for the ESPN fallback so "today" is an
+# ET day (matching what `fetch_todays_games` uses) rather than a UTC
+# day — a 22:00 ET tipoff on Apr 19 would flip to Apr 20 under UTC.
+_NBA_TZ = ZoneInfo("America/New_York")
 
 
 # Default directory, relative to repo root. The GH Actions workflow
@@ -67,6 +74,84 @@ def _game_date_from_game(game: dict) -> str:
     return _utc_today_iso()
 
 
+def _fetch_games_via_espn(days_ahead: int = 2) -> list[dict]:
+    """Fallback game-list source using ESPN's scoreboard endpoint.
+
+    The NBA's stats.nba.com (what ``nba_api`` hits) silently returns
+    empty payloads to datacenter IPs — GitHub Actions, AWS, Azure, etc.
+    ESPN's ``site.api.espn.com`` does not enforce that block, so it's
+    a reliable fallback for the GH runner path. When the runner is in
+    use ``fetch_todays_games`` returns ``[]`` and we fall through to
+    this function.
+
+    Behavior matches ``fetch_todays_games`` + ``fetch_upcoming_games``:
+    return ET-today's scheduled games; if there are none, walk forward
+    up to ``days_ahead`` days and return the first non-empty day.
+
+    Returns a list of game dicts in the same shape produced by
+    ``_game_dict_from_v3`` so ``capture_snapshot_to_jsonl`` doesn't have
+    to branch on the source.
+    """
+    from nba_betting.data.espn import fetch_scoreboard
+
+    def _fetch_day(target: date) -> list[dict]:
+        date_str = target.strftime("%Y%m%d")
+        try:
+            events = fetch_scoreboard(date_str)
+        except Exception:
+            return []
+        games: list[dict] = []
+        for ev in events:
+            # Only pre-tipoff games — matches the nba_api path, which
+            # filters to gameStatus==1. Live/final games would pollute
+            # the closing-line series with post-tipoff odds movement.
+            if ev.get("status") != "STATUS_SCHEDULED":
+                continue
+            home = ev.get("home_team") or {}
+            away = ev.get("away_team") or {}
+            if not home.get("abbr") or not away.get("abbr"):
+                continue
+            # ESPN's ``date`` field is ISO8601 UTC
+            # (``2026-04-19T23:00Z``). Normalize trailing ``Z`` so the
+            # downstream slice in ``_game_date_from_game`` sees a value
+            # it recognizes.
+            game_time_utc = ev.get("date") or ""
+            if game_time_utc.endswith("Z") and "+" not in game_time_utc:
+                # keep trailing Z — ``_game_date_from_game`` only reads
+                # the first 10 chars
+                pass
+            games.append({
+                # ESPN event ID is NOT a valid ``games.id`` (NBA API
+                # format). Emit "" so capture_snapshot_to_jsonl's
+                # ``game.get("game_id") or None`` coalesces to NULL;
+                # the idempotence key uses (date, home, away, source,
+                # ts), so we don't need a game_id for dedupe.
+                "game_id": "",
+                "home_team_id": int(home.get("espn_id") or 0),
+                "home_team_abbr": home.get("abbr", ""),
+                "home_team_name": home.get("name", ""),
+                "away_team_id": int(away.get("espn_id") or 0),
+                "away_team_abbr": away.get("abbr", ""),
+                "away_team_name": away.get("name", ""),
+                "status": ev.get("status", ""),
+                "status_code": 1,
+                "game_time_utc": game_time_utc,
+                "home_score": 0,
+                "away_score": 0,
+            })
+        return games
+
+    today_et = datetime.now(_NBA_TZ).date()
+    games = _fetch_day(today_et)
+    if games:
+        return games
+    for day_offset in range(1, days_ahead + 1):
+        games = _fetch_day(today_et + timedelta(days=day_offset))
+        if games:
+            return games
+    return []
+
+
 def capture_snapshot_to_jsonl(
     out_dir: Path | str = DEFAULT_SNAPSHOT_DIR,
     *,
@@ -92,6 +177,7 @@ def capture_snapshot_to_jsonl(
         espn_lines: int
         warnings: list[str]
         path: str — absolute path to the JSONL file
+        source: str — which fetch path produced the games
     """
     from nba_betting.data.nba_stats import fetch_todays_games, fetch_upcoming_games
     from nba_betting.data.polymarket import get_nba_odds
@@ -102,9 +188,25 @@ def capture_snapshot_to_jsonl(
     # stores naive UTC datetimes (SQLite doesn't carry tzinfo).
     now_naive = now.replace(tzinfo=None) if now.tzinfo else now
 
+    # Prefer nba_api (richer metadata, authoritative team IDs). Falls
+    # through to ESPN only when nba_api returns nothing, which is the
+    # signature of the stats.nba.com datacenter-IP block. We log which
+    # source was used so the workflow output makes the failure mode
+    # obvious — "games=0 nba-api empty; ESPN returned N" is the tell.
+    source = "nba-api"
     games = fetch_todays_games()
     if not games:
         games = fetch_upcoming_games(days_ahead=2)
+    if not games:
+        espn_games = _fetch_games_via_espn(days_ahead=2)
+        if espn_games:
+            games = espn_games
+            source = "espn-fallback"
+            warnings.append(
+                "nba-api returned 0 games; using ESPN fallback "
+                "(expected on GitHub Actions — stats.nba.com blocks "
+                "datacenter IPs)"
+            )
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -114,13 +216,15 @@ def capture_snapshot_to_jsonl(
         # Still touch the file so the workflow has something to commit
         # (or explicitly detects "no games" in the log). Avoid writing a
         # record — import step would reject it anyway.
+        warnings.append("no games scheduled")
         return {
             "games": 0,
             "written": 0,
             "polymarket_lines": 0,
             "espn_lines": 0,
-            "warnings": ["no games scheduled"],
+            "warnings": warnings,
             "path": str(path),
+            "source": source,
         }
 
     try:
@@ -203,6 +307,7 @@ def capture_snapshot_to_jsonl(
         "espn_lines": len(espn_odds),
         "warnings": warnings,
         "path": str(path),
+        "source": source,
     }
 
 
