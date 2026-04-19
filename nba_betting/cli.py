@@ -1066,6 +1066,7 @@ def snapshot_odds(
             f"snapshot-odds[jsonl] {status}[/] "
             f"games={result.get('games', 0)} "
             f"written={result.get('written', 0)} "
+            f"source={result.get('source', 'nba-api')} "
             f"poly={result.get('polymarket_lines', 0)} "
             f"espn={result.get('espn_lines', 0)} "
             f"path={result.get('path', '')}"
