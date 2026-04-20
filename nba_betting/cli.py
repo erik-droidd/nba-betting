@@ -1195,6 +1195,12 @@ def snapshot_odds(
 
         out_dir = jsonl if jsonl else str(DEFAULT_SNAPSHOT_DIR)
         result = capture_snapshot_to_jsonl(out_dir)
+        # `notes` are informational (e.g. "used ESPN fallback" — which is
+        # the expected path on GitHub Actions). They intentionally do NOT
+        # escalate the status from ok → warn; a yellow "warn" label on an
+        # expected path is the exact mis-signal that made us add this
+        # distinction. Only real problems (network failures, empty slate)
+        # land in `warnings` and flip the label.
         status = "ok" if not result.get("warnings") else "warn"
         console.print(
             f"[{'green' if status == 'ok' else 'yellow'}]"
@@ -1206,6 +1212,8 @@ def snapshot_odds(
             f"espn={result.get('espn_lines', 0)} "
             f"path={result.get('path', '')}"
         )
+        for n in result.get("notes", []):
+            console.print(f"[cyan]  note: {n}[/cyan]")
         for w in result.get("warnings", []):
             console.print(f"[yellow]  warn: {w}[/yellow]")
         return
@@ -1238,24 +1246,72 @@ def import_snapshots(
             "`snapshot-odds --jsonl`. Defaults to data/odds_snapshots/."
         ),
     ),
+    pull: bool = typer.Option(
+        False,
+        "--pull",
+        help=(
+            "Run `git pull --ff-only` in the repo root before importing, "
+            "so snapshots committed by the GitHub Actions cron are fetched "
+            "to your local working copy first. Preferred daily flow: "
+            "`python3 -m nba_betting import-snapshots --pull`."
+        ),
+    ),
 ) -> None:
     """Import odds snapshots from JSONL files into the local DB.
 
-    Typical workflow:
-    1. The GitHub Actions cron runner (`snapshot-odds --jsonl`) writes a
-       new file each day and commits it back to the repo.
-    2. You `git pull` on your machine.
-    3. Run `python3 -m nba_betting import-snapshots` to load the new
-       rows into your local SQLite `odds_snapshots` table.
+    Typical workflow (daily):
+        python3 -m nba_betting import-snapshots --pull
+
+    This fetches the GitHub Actions cron commits and loads them into
+    your local SQLite in one step. Without `--pull` you'll need to run
+    `git pull` yourself first, otherwise files committed by the runner
+    won't be on your filesystem yet.
 
     Idempotent — re-running this against the same file imports 0 rows.
     Dedup is done on the natural key
     `(game_date, home_team_id, away_team_id, source, timestamp)`.
     """
+    import subprocess
+    from pathlib import Path as _Path
     from sqlalchemy import select, func
     from nba_betting.data.snapshot_jsonl import import_snapshots_jsonl
     from nba_betting.db.models import Team
     from nba_betting.db.session import get_session, init_db
+
+    if pull:
+        # Pull in the repo that contains this module — not CWD. Users
+        # frequently invoke the CLI from elsewhere (home dir, another
+        # project) and we still want `--pull` to update the NBA-Betting
+        # checkout. The repo root is two levels up from this file
+        # (nba_betting/cli.py → repo root).
+        repo_root = _Path(__file__).resolve().parent.parent
+        try:
+            # `--ff-only` refuses to create a merge commit if local has
+            # diverged — safer than `git pull` for an automated step.
+            # If the pull fails (detached HEAD, conflict, no upstream),
+            # fall through and still attempt the import so an existing
+            # working copy still loads whatever it already has.
+            proc = subprocess.run(
+                ["git", "-C", str(repo_root), "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if proc.returncode == 0:
+                summary = (proc.stdout or proc.stderr).strip().splitlines()
+                first_line = summary[0] if summary else "up to date"
+                console.print(f"[green]git pull ok[/] {first_line}")
+            else:
+                console.print(
+                    f"[yellow]git pull --ff-only failed (rc={proc.returncode}); "
+                    f"continuing with existing files[/yellow]"
+                )
+                if proc.stderr:
+                    console.print(f"[dim]{proc.stderr.strip()}[/dim]")
+        except FileNotFoundError:
+            console.print("[yellow]git not found on PATH; skipping pull[/yellow]")
+        except subprocess.TimeoutExpired:
+            console.print("[yellow]git pull timed out; continuing with existing files[/yellow]")
 
     init_db()
     # Fresh-clone guard: without a populated Teams table, every record

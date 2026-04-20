@@ -175,14 +175,27 @@ def capture_snapshot_to_jsonl(
         written: int — JSONL lines appended
         polymarket_lines: int
         espn_lines: int
-        warnings: list[str]
+        warnings: list[str] — real problems (network failures, no
+            games at all). Triggers a yellow "warn" status in the CLI.
+        notes: list[str] — informational messages (e.g. "used ESPN
+            fallback"). Does NOT trigger a warn status — these are
+            expected/normal events the operator might want to see.
         path: str — absolute path to the JSONL file
         source: str — which fetch path produced the games
     """
     from nba_betting.data.nba_stats import fetch_todays_games, fetch_upcoming_games
     from nba_betting.data.polymarket import get_nba_odds
 
+    # warnings = actual problems (network failures, parsing errors) that
+    # the operator should investigate.
+    # notes    = informational / expected events (e.g. "used ESPN
+    # fallback") that don't indicate anything is wrong. Separating the
+    # two lets the CLI show a green "ok" status when the only thing
+    # that happened was the expected GH-Actions fallback path — the
+    # previous "warn" label was misleading because it looked like a
+    # real failure.
     warnings: list[str] = []
+    notes: list[str] = []
     now = timestamp or datetime.now(timezone.utc)
     # Strip tzinfo for consistency with the rest of the pipeline, which
     # stores naive UTC datetimes (SQLite doesn't carry tzinfo).
@@ -202,9 +215,9 @@ def capture_snapshot_to_jsonl(
         if espn_games:
             games = espn_games
             source = "espn-fallback"
-            warnings.append(
+            notes.append(
                 "nba-api returned 0 games; using ESPN fallback "
-                "(expected on GitHub Actions — stats.nba.com blocks "
+                "(normal on GitHub Actions — stats.nba.com blocks "
                 "datacenter IPs)"
             )
 
@@ -223,6 +236,7 @@ def capture_snapshot_to_jsonl(
             "polymarket_lines": 0,
             "espn_lines": 0,
             "warnings": warnings,
+            "notes": notes,
             "path": str(path),
             "source": source,
         }
@@ -306,6 +320,7 @@ def capture_snapshot_to_jsonl(
         "polymarket_lines": len(polymarket_odds),
         "espn_lines": len(espn_odds),
         "warnings": warnings,
+        "notes": notes,
         "path": str(path),
         "source": source,
     }
