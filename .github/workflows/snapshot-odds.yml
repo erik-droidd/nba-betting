@@ -7,10 +7,26 @@ name: snapshot-odds
 # local machine picks them up with `git pull` and
 # `python3 -m nba_betting import-snapshots`.
 #
-# Cadence: every 30 min from 22:00 UTC through 06:30 UTC. Covers
-#   * ET evening tipoffs (~00:00 UTC / 23:00 UTC during DST)
-#   * West-coast late games (~03:30 UTC wrap)
-#   * A couple of post-tipoff snapshots for line-movement tracking.
+# Cadence: shifted earlier + denser in the pre-tipoff window.
+# Rationale: the capture function filters to STATUS_SCHEDULED games
+# only (stats.nba.com `gameStatus==1` / ESPN `STATUS_SCHEDULED`), so
+# runs during the live-game window produced nothing useful — they
+# logged `games=0 no games scheduled` as warnings. The previous
+# 22:00–06:30 UTC schedule spent 12 of 19 daily runs inside the
+# live-game window (00:00–05:00 UTC) and had zero coverage of the
+# afternoon injury-news window (14:00–22:00 UTC) which is when sharp
+# action moves lines most.
+#
+# New schedule (all UTC):
+#   13:00-17:00  hourly                — late-morning + early weekend tipoffs + Woj/Shams window
+#   18:00-21:30  every 30 min          — afternoon build-up (2–5:30 PM ET), heaviest injury-news hours
+#   22:00-01:45  every 15 min          — dense approach to + through ET tipoff cluster
+#   02:00-02:45  every 15 min          — West Coast closing line (10 PM ET tipoffs)
+#
+# Stops at 03:00 UTC: by then all ET games are live/final and West
+# Coast games have tipped off, so further snapshots capture nothing.
+# Picks back up at 13:00 UTC the next day, giving EU users a fresh
+# overnight commit history by morning.
 # Explicit `workflow_dispatch` for manual smoke testing from the Actions
 # tab — critical during offseason when cron can't be verified against a
 # real game. See USAGE.md §"Running snapshots remotely" for details.
@@ -25,10 +41,22 @@ name: snapshot-odds
 
 on:
   schedule:
-    # Every 30 minutes, 22:00 UTC → 06:30 UTC. Using two ranges keeps
-    # it GitHub-cron compatible (no range crossing midnight).
-    - cron: "0,30 22,23 * * *"
-    - cron: "0,30 0-6 * * *"
+    # Morning + midday (hourly): late-morning injury-news window and
+    # early-afternoon weekend tipoffs (e.g. 1 PM ET Saturday = 17:00 UTC).
+    - cron: "0 13-17 * * *"
+    # Afternoon build-up (every 30 min, 18:00–21:30 UTC = 2–5:30 PM ET):
+    # primary Woj/Shams drop window, sharp money often hits here.
+    - cron: "0,30 18-21 * * *"
+    # Dense approach to ET tipoff cluster (every 15 min, 22:00–23:45 UTC):
+    # critical for CLV — need a fresh snapshot within minutes of tipoff.
+    - cron: "0,15,30,45 22,23 * * *"
+    # Through ET tipoffs + early West Coast pre-tipoff (00:00–01:45 UTC):
+    # every 15 min. The 00:00/00:30 UTC runs capture closing line for
+    # 7:30/8 PM ET tipoffs during EDT, 7 PM ET tipoffs during EST.
+    - cron: "0,15,30,45 0,1 * * *"
+    # West Coast closing line (02:00–02:45 UTC): every 15 min for
+    # 10 PM ET tipoffs. After 03:00 UTC all games are live → stop.
+    - cron: "0,15,30,45 2 * * *"
   workflow_dispatch:
     # Manual trigger. Useful for smoke-testing the pipeline end-to-end
     # before relying on cron, or capturing an ad-hoc snapshot.
