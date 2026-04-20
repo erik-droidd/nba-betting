@@ -221,7 +221,16 @@ python3 -m nba_betting import-snapshots      # Load JSONL → local odds_snapsho
 python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.jsonl
 ```
 
-**Cron schedule:** every 30 minutes from 22:00 UTC through 06:30 UTC — covers ET evenings and West Coast late games. See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) to tweak.
+**Cron schedule:** concentrated in the *pre-tipoff* window (where line movement actually has predictive signal), not during live games:
+
+| Window (UTC) | ET equivalent | Cadence | Purpose |
+|---|---|---|---|
+| 13:00–17:00 | 9 AM – 1 PM | hourly | Late-morning injury news + early weekend tipoffs |
+| 18:00–21:30 | 2 PM – 5:30 PM | every 30 min | Afternoon build-up, main Woj/Shams drop window |
+| 22:00–01:45 | 6 PM – 9:45 PM | every 15 min | Dense closing-line capture through ET tipoffs |
+| 02:00–02:45 | 10 PM – 10:45 PM | every 15 min | West Coast closing line |
+
+~33 runs/day, ~1000 Actions-minutes/month (comfortably under the 2000-min free tier). No runs 03:00–13:00 UTC: all games are live/final and the code filters those out anyway. See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) to tweak.
 
 > **⚠️ GitHub's 60-day inactivity rule:** scheduled workflows are automatically disabled if the repo has no new commits for 60 days. The NBA offseason (June–October) exceeds this. **First action each October**: visit the Actions tab and re-enable the `snapshot-odds` workflow, then trigger a manual run to verify. The workflow itself commits daily during the season, so mid-season deactivation shouldn't happen.
 
