@@ -211,6 +211,14 @@ Based in Europe? NBA games tip off between 00:00 and 03:30 UTC — your local ma
 **Daily usage:**
 
 ```bash
+python3 -m nba_betting import-snapshots --pull   # One-shot: git pull + load JSONL → DB
+```
+
+`--pull` runs `git pull --ff-only` in the repo root before importing, so snapshots committed overnight by the GitHub Actions runner land in your local working copy and then in your local `odds_snapshots` table in a single command. If `--pull` fails (no upstream, merge conflict), it prints a warning and still imports whatever files already exist locally — safe to run daily.
+
+Without `--pull` you'll need to `git pull` manually first:
+
+```bash
 git pull                                     # Pull the overnight snapshot commits
 python3 -m nba_betting import-snapshots      # Load JSONL → local odds_snapshots table
 ```
@@ -220,6 +228,8 @@ python3 -m nba_betting import-snapshots      # Load JSONL → local odds_snapsho
 ```bash
 python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.jsonl
 ```
+
+**Note on the `espn-fallback` source:** when the GH Actions runner prints `source=espn-fallback` with a `note: nba-api returned 0 games; using ESPN fallback`, that's the expected path — `stats.nba.com` silently blocks datacenter IPs, so the runner falls through to ESPN's scoreboard endpoint. The CLI reports this as `ok` with a cyan `note` line, not a yellow warn; the snapshot is still captured and committed normally.
 
 **Cron schedule:** every 30 minutes from 22:00 UTC through 06:30 UTC — covers ET evenings and West Coast late games. See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) to tweak.
 
@@ -451,7 +461,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Daily (morning) | `sync` | Get yesterday's results, update Elo |
 | Before games | `predict` | Get today's recommendations |
 | Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron (or GitHub Actions — see §Step 2b) |
-| Daily (morning, EU users) | `git pull && import-snapshots` | Pull JSONL snapshots written overnight by GitHub Actions |
+| Daily (morning, EU users) | `import-snapshots --pull` | Git-pull + load JSONL snapshots written overnight by GitHub Actions |
 | After games | `sync` then `performance` | Check results and accuracy |
 | After games | `clv` | Review Closing Line Value skill metric |
 | Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
@@ -510,7 +520,8 @@ python3 -m nba_betting predict                   # Today's recommendations + exp
 python3 -m nba_betting predict --bankroll 5000   # Custom bankroll
 python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on a cron)
 python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, for GitHub Actions
-python3 -m nba_betting import-snapshots          # Load JSONL snapshots (written by GH Actions) into local DB
+python3 -m nba_betting import-snapshots --pull   # Git-pull + load JSONL snapshots from GH Actions (daily)
+python3 -m nba_betting import-snapshots          # Same, but without the git pull step
 
 # Backtesting (four modes)
 python3 -m nba_betting backtest                              # Pure model benchmark (no market odds)

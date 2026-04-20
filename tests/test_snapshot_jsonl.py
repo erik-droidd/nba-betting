@@ -494,8 +494,12 @@ def test_capture_falls_back_to_espn_when_nba_api_empty(tmp_path, monkeypatch):
     # No odds providers are mocked with data → no records written,
     # but the slate was discovered via the ESPN fallback.
     assert result["source"] == "espn-fallback"
-    # The fallback warning surfaces the datacenter-block hint.
-    assert any("ESPN fallback" in w for w in result["warnings"])
+    # The fallback message is informational, not a warning — it lives
+    # in `notes` so the CLI stays green when the runner takes this
+    # (expected) path. Pre-fix it landed in `warnings` and the yellow
+    # "warn" label mis-signaled that something had broken.
+    assert any("ESPN fallback" in n for n in result["notes"])
+    assert not any("ESPN fallback" in w for w in result["warnings"])
 
 
 def test_capture_prefers_nba_api_when_it_returns_games(tmp_path, monkeypatch):
