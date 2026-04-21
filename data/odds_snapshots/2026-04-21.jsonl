@@ -8,3 +8,9 @@
 {"game_date":"2026-04-21","home_team_abbr":"BOS","away_team_abbr":"PHI","source":"polymarket","timestamp":"2026-04-21T07:17:25","home_prob":0.665,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-04-22","home_team_abbr":"SAS","away_team_abbr":"POR","source":"polymarket","timestamp":"2026-04-21T07:17:25","home_prob":0.8,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-04-22","home_team_abbr":"LAL","away_team_abbr":"HOU","source":"polymarket","timestamp":"2026-04-21T07:17:25","home_prob":0.31,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-21","home_team_abbr":"BOS","away_team_abbr":"PHI","source":"polymarket","timestamp":"2026-04-21T16:40:07","home_prob":0.705,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-21","home_team_abbr":"BOS","away_team_abbr":"PHI","source":"espn","timestamp":"2026-04-21T16:40:07","home_prob":0.8625,"spread":-14.5,"over_under":217.5,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"SAS","away_team_abbr":"POR","source":"polymarket","timestamp":"2026-04-21T16:40:07","home_prob":0.8,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"SAS","away_team_abbr":"POR","source":"espn","timestamp":"2026-04-21T16:40:07","home_prob":0.7875000000000001,"spread":-11.5,"over_under":219.5,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"LAL","away_team_abbr":"HOU","source":"polymarket","timestamp":"2026-04-21T16:40:07","home_prob":0.275,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"LAL","away_team_abbr":"HOU","source":"espn","timestamp":"2026-04-21T16:40:07","home_prob":0.3875,"spread":4.5,"over_under":207.5,"game_id":null}
