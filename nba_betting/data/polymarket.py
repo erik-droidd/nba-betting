@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
 from nba_betting.config import GAMMA_API_BASE, CLOB_API_BASE
+
+NBA_TZ = ZoneInfo("America/New_York")
 
 # Short team name (as used in Polymarket titles) -> NBA abbreviation
 # Order matters: longer names must come first to avoid substring collisions
@@ -91,27 +95,69 @@ def _extract_teams_from_title(title: str) -> Optional[tuple[str, str]]:
     return None
 
 
-_SLUG_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:$|[^\d])")
+_SLUG_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})$")
 
 
 def _slug_date(slug: str) -> Optional[str]:
-    """Extract the ET game date (YYYY-MM-DD) encoded in a Polymarket event slug.
-
-    Polymarket NBA game events use slugs like ``nba-orl-det-2026-04-22``
-    where the trailing date is the ET calendar date of the tipoff.
-    We rely on this to disambiguate events that share a team pair but
-    refer to different games (e.g. a season has multiple ORL@DET
-    matchups — Polymarket publishes a separate event per date, and all
-    three were visible on 2026-04-22 because the later ones open for
-    trading days in advance). Without this, consumers that dedupe by
-    team pair silently pick the last-seen event and store the wrong
-    market odds for tonight's game. See bug recovered 2026-04-22:
-    stored home_prob 0.645 for DET when the actual moneyline was 0.785.
-    """
-    if not slug:
-        return None
-    m = _SLUG_DATE_RE.search(slug)
+    """ET game date from a Polymarket event slug like ``nba-orl-det-2026-04-22``."""
+    m = _SLUG_DATE_RE.search(slug or "")
     return m.group(1) if m else None
+
+
+def game_date_et(game: dict) -> Optional[str]:
+    """ET calendar date (``YYYY-MM-DD``) of a scheduled game's tipoff."""
+    gtu = game.get("game_time_utc") or ""
+    if not gtu:
+        return None
+    try:
+        if gtu.endswith("Z") and "+" not in gtu:
+            gtu = gtu[:-1] + "+00:00"
+        dt = datetime.fromisoformat(gtu)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(NBA_TZ).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def index_odds_by_pair(odds: list[dict]) -> dict[frozenset, list[dict]]:
+    """Group odds dicts by team-pair, keeping every candidate.
+
+    Polymarket publishes a separate event per matchup date, so one pair
+    can have several active events at once. Callers must disambiguate
+    with :func:`match_odds_for_game`.
+    """
+    idx: dict[frozenset, list[dict]] = {}
+    for o in odds:
+        teams = o.get("teams", {})
+        if len(teams) != 2:
+            continue
+        idx.setdefault(frozenset(teams.keys()), []).append(o)
+    return idx
+
+
+def match_odds_for_game(
+    index: dict[frozenset, list[dict]],
+    pair: frozenset,
+    et_date: Optional[str],
+) -> Optional[dict]:
+    """Return the odds dict for ``pair`` on ``et_date``, or ``None``.
+
+    Prefers an exact (pair, game_date) match. Falls back to the lone
+    candidate only if there is exactly one and it has no parseable
+    date — preserves legacy behavior without resurrecting the
+    multi-event collision bug (2026-04-22: stored 0.645 for DET when
+    the true moneyline was 0.785, because a future rematch overwrote
+    tonight's event under a pair-only index).
+    """
+    cands = index.get(pair, ())
+    if et_date:
+        for c in cands:
+            if c.get("game_date") == et_date:
+                return c
+    if len(cands) == 1 and not cands[0].get("game_date"):
+        return cands[0]
+    return None
 
 
 def _is_game_event(title: str) -> bool:
@@ -271,8 +317,6 @@ def get_nba_odds() -> list[dict]:
                 "teams": {first_abbr: price1, second_abbr: price2},
                 "event_title": title,
                 "event_slug": slug,
-                # ET calendar date of tipoff, parsed from the event
-                # slug. Consumers must match this to the scheduled
                 "game_date": game_date,
             })
 
