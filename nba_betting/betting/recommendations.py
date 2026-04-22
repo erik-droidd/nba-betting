@@ -121,14 +121,52 @@ def generate_recommendations(
     # Check if predict_fn accepts team ID kwargs
     _accepts_ids = "home_id" in inspect.signature(predict_fn).parameters
 
-    # Index market odds by frozenset of team abbrs (order-independent matching)
-    market_by_teams: dict[frozenset, dict] = {}
+    # Index Polymarket odds by (team pair, ET game date).
+    #
+    # Polymarket publishes a separate event per matchup date, so the
+    # same team pair can have several active events open at once
+    # (tonight + future rematches). Indexing by team-pair alone
+    # silently picked whichever event came last in the API response —
+    # often a rematch 5+ days out — and displayed that event's prices
+    # as tonight's market odds. Bug caught 2026-04-22: predict showed
+    # DET @ 0.645 when the actual moneyline was 0.785.
+    #
+    # Fall back to team-pair-only when there is exactly one candidate
+    # WITHOUT a parseable date, preserving behavior for legacy/untagged
+    # odds dicts. Ambiguous multi-event cases skip rather than display
+    # the wrong line.
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timezone
+    _NBA_TZ = ZoneInfo("America/New_York")
+
+    def _game_date_et(game: dict) -> str | None:
+        gtu = game.get("game_time_utc") or ""
+        if not gtu:
+            return None
+        try:
+            if gtu.endswith("Z") and "+" not in gtu:
+                gtu = gtu[:-1] + "+00:00"
+            dt = datetime.fromisoformat(gtu)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_NBA_TZ).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return None
+
+    market_by_teams_date: dict[tuple[frozenset, str], dict] = {}
+    market_by_teams_counts: dict[frozenset, int] = {}
+    market_by_teams_fallback: dict[frozenset, dict] = {}
     for odds in market_odds:
         teams = odds.get("teams", {})
         abbrs = list(teams.keys())
-        if len(abbrs) == 2:
-            key = frozenset(abbrs)
-            market_by_teams[key] = odds
+        if len(abbrs) != 2:
+            continue
+        key = frozenset(abbrs)
+        market_by_teams_counts[key] = market_by_teams_counts.get(key, 0) + 1
+        market_by_teams_fallback[key] = odds
+        gd = odds.get("game_date")
+        if gd:
+            market_by_teams_date[(key, gd)] = odds
 
     # Index ESPN odds as fallback + for spread/OU data
     espn_by_teams: dict[frozenset, dict] = {}
@@ -163,8 +201,19 @@ def generate_recommendations(
         net_adj = home_inj_adj - away_inj_adj
         model_home_prob = max(0.01, min(0.99, model_home_prob + net_adj))
 
-        # Find matching market odds (order-independent)
-        market_match = market_by_teams.get(frozenset([home_abbr, away_abbr]))
+        # Find matching market odds: prefer exact (team pair, ET date)
+        # match; fall back to pair-only only when there's a single
+        # candidate without a parseable date. Skip in ambiguous cases
+        # rather than display a future rematch's prices.
+        _mkey = frozenset([home_abbr, away_abbr])
+        _et_date = _game_date_et(game)
+        market_match = None
+        if _et_date:
+            market_match = market_by_teams_date.get((_mkey, _et_date))
+        if market_match is None and market_by_teams_counts.get(_mkey) == 1:
+            _cand = market_by_teams_fallback.get(_mkey)
+            if _cand is not None and not _cand.get("game_date"):
+                market_match = _cand
 
         # Get spread/OU from ESPN if available
         espn_match = espn_by_teams.get(frozenset([home_abbr, away_abbr]))
