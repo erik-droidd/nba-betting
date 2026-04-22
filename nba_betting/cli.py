@@ -1278,6 +1278,12 @@ def import_snapshots(
     from nba_betting.db.models import Team
     from nba_betting.db.session import get_session, init_db
 
+    # Local exception used to bail out of the multi-step git flow below
+    # without pyramid-ing if/else. Scoped inside the function so it
+    # doesn't leak into the module namespace.
+    class _SkipPull(Exception):
+        pass
+
     if pull:
         # Pull in the repo that contains this module — not CWD. Users
         # frequently invoke the CLI from elsewhere (home dir, another
@@ -1285,33 +1291,83 @@ def import_snapshots(
         # checkout. The repo root is two levels up from this file
         # (nba_betting/cli.py → repo root).
         repo_root = _Path(__file__).resolve().parent.parent
-        try:
-            # `--ff-only` refuses to create a merge commit if local has
-            # diverged — safer than `git pull` for an automated step.
-            # If the pull fails (detached HEAD, conflict, no upstream),
-            # fall through and still attempt the import so an existing
-            # working copy still loads whatever it already has.
-            proc = subprocess.run(
-                ["git", "-C", str(repo_root), "pull", "--ff-only"],
+
+        # CRITICAL: the GH Actions cron commits snapshot JSONL only to
+        # `main`. A plain `git pull --ff-only` (what we used to do) pulls
+        # the CURRENT branch's upstream, which for a user sitting on a
+        # feature branch returns "Already up to date" — truthful but
+        # silently misses every new snapshot on main. That exact sharp
+        # edge bit the user on 2026-04-22 and is why this is now
+        # fast-forward-from-origin/main rather than a plain pull.
+        def _run_git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", str(repo_root), *args],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=timeout,
             )
-            if proc.returncode == 0:
-                summary = (proc.stdout or proc.stderr).strip().splitlines()
-                first_line = summary[0] if summary else "up to date"
-                console.print(f"[green]git pull ok[/] {first_line}")
-            else:
+
+        try:
+            # Step 1: fetch origin. Gets origin/main up to date without
+            # touching the working copy. Safe on any branch state.
+            fetch = _run_git("fetch", "origin", "main")
+            if fetch.returncode != 0:
                 console.print(
-                    f"[yellow]git pull --ff-only failed (rc={proc.returncode}); "
-                    f"continuing with existing files[/yellow]"
+                    f"[yellow]git fetch origin main failed "
+                    f"(rc={fetch.returncode}); continuing with existing files[/yellow]"
                 )
-                if proc.stderr:
-                    console.print(f"[dim]{proc.stderr.strip()}[/dim]")
+                if fetch.stderr:
+                    console.print(f"[dim]{fetch.stderr.strip()}[/dim]")
+                raise _SkipPull()
+
+            # Step 2: figure out whether the working copy is already at
+            # or behind origin/main. If behind, fast-forward. If ahead
+            # or diverged (user on an unmerged feature branch with local
+            # commits), don't touch anything — warn and continue.
+            branch_out = _run_git("rev-parse", "--abbrev-ref", "HEAD")
+            branch = branch_out.stdout.strip() if branch_out.returncode == 0 else "?"
+
+            # Is origin/main an ancestor of HEAD? If yes, local is
+            # already at/ahead of main — no fast-forward needed.
+            is_ancestor = _run_git(
+                "merge-base", "--is-ancestor", "origin/main", "HEAD"
+            ).returncode == 0
+            if is_ancestor:
+                console.print(
+                    f"[green]git: already up to date with origin/main "
+                    f"(branch={branch})[/]"
+                )
+            else:
+                # origin/main has commits we don't — attempt FF merge.
+                # This works from any branch whose HEAD is a strict
+                # ancestor of origin/main (e.g. `main` itself, or a
+                # feature branch already merged via PR).
+                merge = _run_git("merge", "--ff-only", "origin/main")
+                if merge.returncode == 0:
+                    first = (merge.stdout or merge.stderr).strip().splitlines()
+                    msg = first[0] if first else "fast-forwarded"
+                    console.print(
+                        f"[green]git: fast-forwarded {branch} → origin/main[/] {msg}"
+                    )
+                else:
+                    # Fast-forward impossible: user has local commits
+                    # not on main. Don't touch their branch — loudly
+                    # tell them to switch to main and try again.
+                    console.print(
+                        f"[yellow]⚠ Snapshot JSONL files are committed to "
+                        f"`main`, but you're on `{branch}` with local commits "
+                        f"that diverge from main. `--pull` can't fast-forward "
+                        f"safely — run `git checkout main && python3 -m "
+                        f"nba_betting import-snapshots --pull` instead.[/yellow]"
+                    )
+                    if merge.stderr:
+                        console.print(f"[dim]{merge.stderr.strip()}[/dim]")
+        except _SkipPull:
+            pass
         except FileNotFoundError:
             console.print("[yellow]git not found on PATH; skipping pull[/yellow]")
         except subprocess.TimeoutExpired:
-            console.print("[yellow]git pull timed out; continuing with existing files[/yellow]")
+            console.print("[yellow]git fetch/merge timed out; continuing with existing files[/yellow]")
 
     init_db()
     # Fresh-clone guard: without a populated Teams table, every record
