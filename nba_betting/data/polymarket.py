@@ -91,6 +91,29 @@ def _extract_teams_from_title(title: str) -> Optional[tuple[str, str]]:
     return None
 
 
+_SLUG_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:$|[^\d])")
+
+
+def _slug_date(slug: str) -> Optional[str]:
+    """Extract the ET game date (YYYY-MM-DD) encoded in a Polymarket event slug.
+
+    Polymarket NBA game events use slugs like ``nba-orl-det-2026-04-22``
+    where the trailing date is the ET calendar date of the tipoff.
+    We rely on this to disambiguate events that share a team pair but
+    refer to different games (e.g. a season has multiple ORL@DET
+    matchups — Polymarket publishes a separate event per date, and all
+    three were visible on 2026-04-22 because the later ones open for
+    trading days in advance). Without this, consumers that dedupe by
+    team pair silently pick the last-seen event and store the wrong
+    market odds for tonight's game. See bug recovered 2026-04-22:
+    stored home_prob 0.645 for DET when the actual moneyline was 0.785.
+    """
+    if not slug:
+        return None
+    m = _SLUG_DATE_RE.search(slug)
+    return m.group(1) if m else None
+
+
 def _is_game_event(title: str) -> bool:
     """Check if an event title represents a single game matchup."""
     lower = title.lower()
@@ -156,6 +179,8 @@ def get_nba_odds() -> list[dict]:
             continue
 
         first_abbr, second_abbr = teams
+        slug = event.get("slug", "")
+        game_date = _slug_date(slug)
         markets = event.get("markets", [])
 
         # Skip events where ALL markets are closed (game resolved/expired)
@@ -245,6 +270,10 @@ def get_nba_odds() -> list[dict]:
             odds.append({
                 "teams": {first_abbr: price1, second_abbr: price2},
                 "event_title": title,
+                "event_slug": slug,
+                # ET calendar date of tipoff, parsed from the event
+                # slug. Consumers must match this to the scheduled
+                "game_date": game_date,
             })
 
     return odds

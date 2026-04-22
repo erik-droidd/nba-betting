@@ -1,9 +1,30 @@
 """Odds snapshot storage for line movement tracking."""
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+
+_NBA_TZ = ZoneInfo("America/New_York")
+
+
+def _game_date_et_for_match(game: dict) -> str | None:
+    """ET calendar date of tipoff (``YYYY-MM-DD``) for matching
+    Polymarket events by (team pair, date). See
+    ``snapshot_jsonl._game_date_et_for_match`` for the bug this fixes."""
+    gtu = game.get("game_time_utc") or ""
+    if not gtu:
+        return None
+    try:
+        if gtu.endswith("Z") and "+" not in gtu:
+            gtu = gtu[:-1] + "+00:00"
+        dt = datetime.fromisoformat(gtu)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_NBA_TZ).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
 
 from nba_betting.db.models import OddsSnapshot, Team
 from nba_betting.db.session import get_session
@@ -87,12 +108,24 @@ def snapshot_current_odds(
         today = date.today()
         count = 0
 
-        # Index market odds by team pair
-        poly_by_teams: dict[frozenset, dict] = {}
+        # Polymarket publishes a separate event per matchup date — a
+        # season's ORL@DET pair can have several active events open at
+        # once. Keying by team-pair alone silently overwrote and picked
+        # up odds from the wrong future date. Key by (team pair, ET game
+        # date) parsed from the event slug so we match the right game.
+        poly_by_teams_date: dict[tuple[frozenset, str], dict] = {}
+        poly_by_teams_counts: dict[frozenset, int] = {}
+        poly_by_teams_fallback: dict[frozenset, dict] = {}
         for o in polymarket_odds:
             t = o.get("teams", {})
-            if len(t) == 2:
-                poly_by_teams[frozenset(t.keys())] = o
+            if len(t) != 2:
+                continue
+            key = frozenset(t.keys())
+            poly_by_teams_counts[key] = poly_by_teams_counts.get(key, 0) + 1
+            poly_by_teams_fallback[key] = o
+            gd = o.get("game_date")
+            if gd:
+                poly_by_teams_date[(key, gd)] = o
 
         espn_by_teams: dict[frozenset, dict] = {}
         for o in espn_odds:
@@ -131,9 +164,21 @@ def snapshot_current_odds(
                     game_date_val = today
 
             key = frozenset([home_abbr, away_abbr])
+            et_date = _game_date_et_for_match(game)
+
+            # Prefer exact (team pair, ET date) match; fall back to
+            # pair-only only when there's a single candidate lacking a
+            # parseable date, so ambiguous multi-event cases skip
+            # rather than record the wrong moneyline.
+            poly = None
+            if et_date:
+                poly = poly_by_teams_date.get((key, et_date))
+            if poly is None and poly_by_teams_counts.get(key) == 1:
+                candidate = poly_by_teams_fallback.get(key)
+                if candidate is not None and not candidate.get("game_date"):
+                    poly = candidate
 
             # Polymarket snapshot
-            poly = poly_by_teams.get(key)
             if poly:
                 t = poly.get("teams", {})
                 poly_home_prob = t.get(home_abbr)

@@ -59,6 +59,32 @@ def _utc_today_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _game_date_et_for_match(game: dict) -> str | None:
+    """Return the ET calendar date of tipoff (``YYYY-MM-DD``).
+
+    Used to match Polymarket event odds — whose slugs encode the ET game
+    date — against the scheduled game. Polymarket publishes a separate
+    event per matchup date, so a same-season ORL@DET pair can have three
+    open events at once (different dates). Keying the odds index by
+    team-pair alone silently overwrote and produced wrong moneylines
+    (see bug 2026-04-22: stored 0.645 for DET when the true close was
+    0.785). Returning None makes the caller skip rather than mis-match.
+    """
+    gtu = game.get("game_time_utc") or ""
+    if not gtu:
+        return None
+    try:
+        # Accept trailing 'Z' for compatibility with both nba_api and ESPN.
+        if gtu.endswith("Z") and "+" not in gtu:
+            gtu = gtu[:-1] + "+00:00"
+        dt = datetime.fromisoformat(gtu)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_NBA_TZ).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
 def _game_date_from_game(game: dict) -> str:
     """Extract the game's UTC-day ISO date string.
 
@@ -254,13 +280,30 @@ def capture_snapshot_to_jsonl(
         espn_odds = []
         warnings.append(f"espn fetch failed: {e}")
 
-    # Build team-pair indices mirroring snapshot_current_odds
-    poly_by_teams: dict[frozenset, dict] = {}
+    # Polymarket publishes a separate event per matchup date — a
+    # season's ORL@DET pair can have several active events open at
+    # once. Keying by team-pair alone silently overwrote and picked
+    # up odds from the wrong future date. Key by (team pair, ET game
+    # date) parsed from the event slug so we match the right game.
+    poly_by_teams_date: dict[tuple[frozenset, str], dict] = {}
+    # Fallback index (team pair only) used when we have exactly one
+    # Polymarket event for a pair and its slug has no parseable date —
+    # preserves behavior for events that predate our date-tagging.
+    poly_by_teams_counts: dict[frozenset, int] = {}
+    poly_by_teams_fallback: dict[frozenset, dict] = {}
     for o in polymarket_odds:
         t = o.get("teams", {})
-        if len(t) == 2:
-            poly_by_teams[frozenset(t.keys())] = o
+        if len(t) != 2:
+            continue
+        key = frozenset(t.keys())
+        poly_by_teams_counts[key] = poly_by_teams_counts.get(key, 0) + 1
+        poly_by_teams_fallback[key] = o
+        gd = o.get("game_date")
+        if gd:
+            poly_by_teams_date[(key, gd)] = o
 
+    # ESPN scoreboard is fetched per-date, so the same collision risk
+    # doesn't arise — keep the existing team-pair index.
     espn_by_teams: dict[frozenset, dict] = {}
     for o in espn_odds:
         t = o.get("teams", {})
@@ -277,9 +320,24 @@ def capture_snapshot_to_jsonl(
             continue
         game_id = game.get("game_id") or None
         game_date_iso = _game_date_from_game(game)
+        et_date = _game_date_et_for_match(game)
         key = frozenset([home_abbr, away_abbr])
 
-        poly = poly_by_teams.get(key)
+        # Prefer an exact (team pair, ET date) match on Polymarket.
+        # Only fall back to the pair-only match when there's a unique
+        # event for the pair, so ambiguous multi-event cases skip
+        # rather than record the wrong moneyline.
+        poly = None
+        if et_date:
+            poly = poly_by_teams_date.get((key, et_date))
+        if poly is None and poly_by_teams_counts.get(key) == 1:
+            candidate = poly_by_teams_fallback.get(key)
+            # Only accept the untagged fallback when the candidate has
+            # no game_date at all — if it has a date and it didn't
+            # match, that's a real mismatch we should not paper over.
+            if candidate is not None and not candidate.get("game_date"):
+                poly = candidate
+
         if poly:
             t = poly.get("teams", {})
             records.append({
