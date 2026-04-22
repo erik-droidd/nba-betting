@@ -615,6 +615,139 @@ def test_espn_fallback_strips_event_id_so_import_is_safe(tmp_path, monkeypatch):
         sess.close()
 
 
+def test_capture_picks_right_polymarket_event_when_pair_has_multiple_dates(tmp_path, monkeypatch):
+    """Regression: Polymarket publishes a separate event per matchup date,
+    so a season's ORL@DET pair can have several open events at once
+    (today's game + future rematches that opened for early trading).
+
+    The original consumer keyed the Polymarket index by team-pair alone
+    and silently picked the last event, producing the wrong moneyline
+    for tonight's game. Example caught 2026-04-22: stored
+    ``home_prob=0.645`` for DET when the actual moneyline was 0.785 —
+    0.645 came from a future rematch event 5 days out.
+
+    The fix: Polymarket odds now carry the ET ``game_date`` parsed from
+    the event slug, and the consumer matches by (pair, game_date). This
+    test pins that: the consumer must pick the 0.78 event (tonight's)
+    and ignore the 0.645 one (a future rematch), even though both share
+    the same team pair.
+    """
+    from nba_betting.data import snapshot_jsonl as jsonl
+
+    fake_games = [{
+        "game_id": "0042500102",
+        "home_team_abbr": "DET",
+        "away_team_abbr": "ORL",
+        "home_team_id": 1,
+        "away_team_id": 2,
+        # 23:00Z on Apr 22 = 19:00 ET Apr 22 → ET date is 2026-04-22.
+        "game_time_utc": "2026-04-22T23:00:00Z",
+    }]
+    # Tonight's game (correct event) + a future rematch with a
+    # different slug-encoded date. Order intentionally puts the wrong
+    # one last so the old dict-overwrite bug would surface.
+    fake_poly = [
+        {
+            "teams": {"ORL": 0.215, "DET": 0.785},
+            "event_title": "Magic vs. Pistons",
+            "event_slug": "nba-orl-det-2026-04-22",
+            "game_date": "2026-04-22",
+        },
+        {
+            "teams": {"DET": 0.645, "ORL": 0.355},
+            "event_title": "Pistons vs. Magic",
+            "event_slug": "nba-det-orl-2026-04-27",
+            "game_date": "2026-04-27",
+        },
+    ]
+
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_todays_games",
+        lambda *a, **kw: fake_games,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_upcoming_games",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.polymarket.get_nba_odds",
+        lambda: fake_poly,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn_odds.get_espn_odds",
+        lambda: [],
+    )
+
+    out_dir = tmp_path / "captured"
+    result = jsonl.capture_snapshot_to_jsonl(
+        out_dir,
+        timestamp=datetime(2026, 4, 22, 17, 0, 0),
+    )
+    assert result["written"] == 1
+    rec = json.loads(Path(result["path"]).read_text().strip())
+    assert rec["source"] == "polymarket"
+    assert rec["home_team_abbr"] == "DET"
+    # The crucial assertion: picked tonight's event, not the rematch.
+    assert rec["home_prob"] == pytest.approx(0.785)
+
+
+def test_capture_skips_ambiguous_polymarket_when_no_date_match(tmp_path, monkeypatch):
+    """If Polymarket returns multiple events for the same team pair and
+    none matches the game's ET date, we'd rather skip the Polymarket
+    record than silently pick one. The old behavior picked the last
+    one seen — the new behavior must emit nothing for that source."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+
+    fake_games = [{
+        "game_id": "0042500102",
+        "home_team_abbr": "DET",
+        "away_team_abbr": "ORL",
+        "home_team_id": 1,
+        "away_team_id": 2,
+        "game_time_utc": "2026-04-22T23:00:00Z",  # ET date 2026-04-22
+    }]
+    # Two events, neither matches tonight's date.
+    fake_poly = [
+        {
+            "teams": {"DET": 0.60, "ORL": 0.40},
+            "event_title": "Pistons vs. Magic",
+            "event_slug": "nba-det-orl-2026-04-25",
+            "game_date": "2026-04-25",
+        },
+        {
+            "teams": {"DET": 0.645, "ORL": 0.355},
+            "event_title": "Pistons vs. Magic",
+            "event_slug": "nba-det-orl-2026-04-27",
+            "game_date": "2026-04-27",
+        },
+    ]
+
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_todays_games",
+        lambda *a, **kw: fake_games,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.nba_stats.fetch_upcoming_games",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.polymarket.get_nba_odds",
+        lambda: fake_poly,
+    )
+    monkeypatch.setattr(
+        "nba_betting.data.espn_odds.get_espn_odds",
+        lambda: [],
+    )
+
+    out_dir = tmp_path / "captured"
+    result = jsonl.capture_snapshot_to_jsonl(
+        out_dir,
+        timestamp=datetime(2026, 4, 22, 17, 0, 0),
+    )
+    # No Polymarket record written (no date match, ambiguous pair).
+    assert result["written"] == 0
+
+
 def test_parse_timestamp_drops_tz_to_match_existing_rows():
     """The existing ``snapshot_current_odds()`` writes
     ``datetime.utcnow()`` (naive). If JSONL imports landed as
