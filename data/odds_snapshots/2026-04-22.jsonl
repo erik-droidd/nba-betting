@@ -2,3 +2,7 @@
 {"game_date":"2026-04-23","home_team_abbr":"OKC","away_team_abbr":"PHX","source":"polymarket","timestamp":"2026-04-22T06:25:18","home_prob":0.825,"spread":null,"over_under":null,"game_id":"0042500142"}
 {"game_date":"2026-04-22","home_team_abbr":"DET","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-04-22T07:16:19","home_prob":0.65,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-04-23","home_team_abbr":"OKC","away_team_abbr":"PHX","source":"polymarket","timestamp":"2026-04-22T07:16:19","home_prob":0.81,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"DET","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-04-22T16:41:10","home_prob":0.645,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-22","home_team_abbr":"DET","away_team_abbr":"ORL","source":"espn","timestamp":"2026-04-22T16:41:10","home_prob":0.7125,"spread":-8.5,"over_under":218.5,"game_id":null}
+{"game_date":"2026-04-23","home_team_abbr":"OKC","away_team_abbr":"PHX","source":"polymarket","timestamp":"2026-04-22T16:41:10","home_prob":0.82,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-04-23","home_team_abbr":"OKC","away_team_abbr":"PHX","source":"espn","timestamp":"2026-04-22T16:41:10","home_prob":0.9375,"spread":-17.5,"over_under":216.5,"game_id":null}
