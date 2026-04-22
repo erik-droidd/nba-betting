@@ -121,14 +121,12 @@ def generate_recommendations(
     # Check if predict_fn accepts team ID kwargs
     _accepts_ids = "home_id" in inspect.signature(predict_fn).parameters
 
-    # Index market odds by frozenset of team abbrs (order-independent matching)
-    market_by_teams: dict[frozenset, dict] = {}
-    for odds in market_odds:
-        teams = odds.get("teams", {})
-        abbrs = list(teams.keys())
-        if len(abbrs) == 2:
-            key = frozenset(abbrs)
-            market_by_teams[key] = odds
+    from nba_betting.data.polymarket import (
+        game_date_et,
+        index_odds_by_pair,
+        match_odds_for_game,
+    )
+    market_index = index_odds_by_pair(market_odds)
 
     # Index ESPN odds as fallback + for spread/OU data
     espn_by_teams: dict[frozenset, dict] = {}
@@ -163,8 +161,9 @@ def generate_recommendations(
         net_adj = home_inj_adj - away_inj_adj
         model_home_prob = max(0.01, min(0.99, model_home_prob + net_adj))
 
-        # Find matching market odds (order-independent)
-        market_match = market_by_teams.get(frozenset([home_abbr, away_abbr]))
+        market_match = match_odds_for_game(
+            market_index, frozenset([home_abbr, away_abbr]), game_date_et(game)
+        )
 
         # Get spread/OU from ESPN if available
         espn_match = espn_by_teams.get(frozenset([home_abbr, away_abbr]))
