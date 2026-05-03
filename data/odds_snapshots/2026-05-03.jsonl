@@ -4,3 +4,7 @@
 {"game_date":"2026-05-03","home_team_abbr":"CLE","away_team_abbr":"TOR","source":"polymarket","timestamp":"2026-05-03T05:37:41","home_prob":0.715,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-05-03","home_team_abbr":"DET","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-05-03T14:13:51","home_prob":0.745,"spread":null,"over_under":null,"game_id":"0042500107"}
 {"game_date":"2026-05-03","home_team_abbr":"CLE","away_team_abbr":"TOR","source":"polymarket","timestamp":"2026-05-03T14:13:51","home_prob":0.715,"spread":null,"over_under":null,"game_id":"0042500137"}
+{"game_date":"2026-05-03","home_team_abbr":"DET","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-05-03T15:57:30","home_prob":0.745,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-03","home_team_abbr":"DET","away_team_abbr":"ORL","source":"espn","timestamp":"2026-05-03T15:57:30","home_prob":0.7125,"spread":-8.5,"over_under":201.5,"game_id":null}
+{"game_date":"2026-05-03","home_team_abbr":"CLE","away_team_abbr":"TOR","source":"polymarket","timestamp":"2026-05-03T15:57:30","home_prob":0.725,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-03","home_team_abbr":"CLE","away_team_abbr":"TOR","source":"espn","timestamp":"2026-05-03T15:57:30","home_prob":0.7125,"spread":-8.5,"over_under":211.5,"game_id":null}
