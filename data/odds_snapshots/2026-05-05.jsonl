@@ -14,3 +14,7 @@
 {"game_date":"2026-05-05","home_team_abbr":"DET","away_team_abbr":"CLE","source":"espn","timestamp":"2026-05-05T19:45:34","home_prob":0.5875,"spread":-3.5,"over_under":215.5,"game_id":null}
 {"game_date":"2026-05-06","home_team_abbr":"OKC","away_team_abbr":"LAL","source":"polymarket","timestamp":"2026-05-05T19:45:34","home_prob":0.855,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-05-06","home_team_abbr":"OKC","away_team_abbr":"LAL","source":"espn","timestamp":"2026-05-05T19:45:34","home_prob":0.8875,"spread":-15.5,"over_under":213.5,"game_id":null}
+{"game_date":"2026-05-05","home_team_abbr":"DET","away_team_abbr":"CLE","source":"polymarket","timestamp":"2026-05-05T21:09:28","home_prob":0.585,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-05","home_team_abbr":"DET","away_team_abbr":"CLE","source":"espn","timestamp":"2026-05-05T21:09:28","home_prob":0.5875,"spread":-3.5,"over_under":215.5,"game_id":null}
+{"game_date":"2026-05-06","home_team_abbr":"OKC","away_team_abbr":"LAL","source":"polymarket","timestamp":"2026-05-05T21:09:28","home_prob":0.855,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-06","home_team_abbr":"OKC","away_team_abbr":"LAL","source":"espn","timestamp":"2026-05-05T21:09:28","home_prob":0.8875,"spread":-15.5,"over_under":213.5,"game_id":null}
