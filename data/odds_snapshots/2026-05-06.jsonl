@@ -2,3 +2,7 @@
 {"game_date":"2026-05-07","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-06T03:49:58","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-05-06","home_team_abbr":"NYK","away_team_abbr":"PHI","source":"polymarket","timestamp":"2026-05-06T05:36:49","home_prob":0.715,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-05-07","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-06T05:36:49","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-06","home_team_abbr":"NYK","away_team_abbr":"PHI","source":"polymarket","timestamp":"2026-05-06T15:30:22","home_prob":0.735,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-06","home_team_abbr":"NYK","away_team_abbr":"PHI","source":"espn","timestamp":"2026-05-06T15:30:22","home_prob":0.6875,"spread":-7.5,"over_under":215.5,"game_id":null}
+{"game_date":"2026-05-07","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-06T15:30:22","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-07","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"espn","timestamp":"2026-05-06T15:30:22","home_prob":0.7375,"spread":-9.5,"over_under":215.5,"game_id":null}
