@@ -51,8 +51,14 @@ def save_history(records: list[PredictionRecord]) -> None:
 
 def record_predictions(recommendations) -> int:
     """Save today's predictions to history. Returns count of new records."""
+    from nba_betting.data.nba_stats import today_et
+
     history = load_history()
-    today = str(date.today())
+    # Use the NBA scheduling day (US/Eastern), so the history key matches
+    # the date stored on Game rows and the snapshot game_date column. A
+    # local-system `date.today()` would skew the key for non-ET users.
+    today_date = today_et()
+    today = str(today_date)
 
     # Don't duplicate
     existing_keys = {(r.date, r.home_team, r.away_team) for r in history}
@@ -73,7 +79,7 @@ def record_predictions(recommendations) -> int:
             h_id = _teams.get(rec.home_team)
             a_id = _teams.get(rec.away_team)
             if h_id and a_id:
-                opening = get_opening_line(date.today(), h_id, a_id)
+                opening = get_opening_line(today_date, h_id, a_id)
                 if opening and opening.get("home_prob"):
                     opening_probs[(rec.home_team, rec.away_team)] = opening["home_prob"]
     except Exception:

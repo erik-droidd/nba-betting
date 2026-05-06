@@ -1,7 +1,7 @@
 """Odds snapshot storage for line movement tracking."""
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -84,12 +84,23 @@ def snapshot_current_odds(
 
     Returns count of snapshots saved.
     """
+    from nba_betting.data.nba_stats import today_et
+
     session = get_session()
     try:
         # Build team abbr -> team_id lookup
         teams = {t.abbreviation: t.id for t in session.execute(select(Team)).scalars().all()}
-        now = datetime.utcnow()
-        today = date.today()
+        # Naive UTC matches the existing OddsSnapshot.timestamp column —
+        # stored values are tz-naive UTC, so comparisons in _is_duplicate
+        # need the same shape. ``datetime.utcnow()`` is deprecated in
+        # 3.12+, this is the recommended replacement that preserves the
+        # naive-UTC semantics.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Fallback "today" for snapshots whose game record lacks a
+        # parseable game_time_utc — use the NBA scheduling day (ET) so
+        # the join with the games table stays consistent with the rest
+        # of the system.
+        today = today_et()
         count = 0
 
         poly_index = index_odds_by_pair(polymarket_odds)

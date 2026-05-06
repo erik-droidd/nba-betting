@@ -259,10 +259,14 @@ def predict(
     except Exception:
         pass  # Non-critical
 
-    # Get line movement data
+    # Get line movement data. Snapshots are filed under each game's UTC
+    # date (parsed from `game_time_utc[:10]` in `snapshot_current_odds`),
+    # so query with the same key per game. Falling back to today_et()
+    # only when the game record is missing a parseable timestamp.
     line_movements = {}
     try:
         from nba_betting.data.odds_tracker import get_line_movement
+        from nba_betting.data.nba_stats import today_et
         from nba_betting.db.models import Team
         from nba_betting.db.session import get_session
         from sqlalchemy import select
@@ -273,10 +277,18 @@ def predict(
         for g in games:
             h_id = team_lookup.get(g["home_team_abbr"])
             a_id = team_lookup.get(g["away_team_abbr"])
-            if h_id and a_id:
-                lm = get_line_movement(date_type.today(), h_id, a_id)
-                if lm.get("n_snapshots", 0) > 0:
-                    line_movements[(g["home_team_abbr"], g["away_team_abbr"])] = lm
+            if not (h_id and a_id):
+                continue
+            gtu = (g.get("game_time_utc") or "")[:10]
+            game_date = today_et()
+            if len(gtu) == 10 and gtu[4] == "-" and gtu[7] == "-":
+                try:
+                    game_date = date_type.fromisoformat(gtu)
+                except ValueError:
+                    pass
+            lm = get_line_movement(game_date, h_id, a_id)
+            if lm.get("n_snapshots", 0) > 0:
+                line_movements[(g["home_team_abbr"], g["away_team_abbr"])] = lm
     except Exception:
         pass  # Non-critical
 

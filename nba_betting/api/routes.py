@@ -168,10 +168,14 @@ def get_predictions(bankroll: float = Query(1000.0)):
     from nba_betting.data.injuries import load_injuries
     injuries = load_injuries()
 
-    # Line movement data
+    # Line movement data. Mirrors the cli.predict path: query snapshots
+    # using each game's UTC date prefix (matching how snapshot_current_odds
+    # files them), with today_et() as the fallback when the timestamp is
+    # missing or unparseable.
     line_movements = {}
     try:
         from nba_betting.data.odds_tracker import get_line_movement
+        from nba_betting.data.nba_stats import today_et
         from nba_betting.db.models import Team
         from nba_betting.db.session import get_session
         from sqlalchemy import select as sa_select
@@ -182,10 +186,18 @@ def get_predictions(bankroll: float = Query(1000.0)):
         for g in games:
             h_id = _team_lkp.get(g["home_team_abbr"])
             a_id = _team_lkp.get(g["away_team_abbr"])
-            if h_id and a_id:
-                lm = get_line_movement(date_type.today(), h_id, a_id)
-                if lm.get("n_snapshots", 0) > 0:
-                    line_movements[(g["home_team_abbr"], g["away_team_abbr"])] = lm
+            if not (h_id and a_id):
+                continue
+            gtu = (g.get("game_time_utc") or "")[:10]
+            game_date = today_et()
+            if len(gtu) == 10 and gtu[4] == "-" and gtu[7] == "-":
+                try:
+                    game_date = date_type.fromisoformat(gtu)
+                except ValueError:
+                    pass
+            lm = get_line_movement(game_date, h_id, a_id)
+            if lm.get("n_snapshots", 0) > 0:
+                line_movements[(g["home_team_abbr"], g["away_team_abbr"])] = lm
     except Exception:
         pass
 

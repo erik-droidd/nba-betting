@@ -553,14 +553,24 @@ Kelly fraction is scaled by three factors derived from the current bet signal:
 
 The composite is clamped to `[0.25×, 1.25×]` of the base `KELLY_FRACTION`.
 
-**Slate-level portfolio Kelly** (`optimize_slate()`): when multiple bets
-are recommended on the same slate, they are sized jointly rather than
-independently. A `scipy.optimize.minimize(SLSQP)` solver maximises
-`E[log(1 + Σ fᵢ·rᵢ)]` (approximated via Gaussian copula Monte Carlo)
-subject to `Σ fᵢ ≤ MAX_EXPOSURE_PCT` and `0 ≤ fᵢ ≤ MAX_BET_PCT`.
+**Same-day correlation haircut** (currently the production sizing path):
+the live `predict` flow in `betting/recommendations.py` sizes each bet
+independently with `kelly_fraction()`, then scales the whole slate by
+`1 / sqrt(1 + (n − 1)·ρ)` with `ρ = 0.15`. This is a closed-form
+variance-adjusted shrinkage that approximates joint sizing without an
+optimizer in the hot path.
+
+**Slate-level portfolio Kelly** (`optimize_slate()`, available but not
+currently wired into `recommendations.generate_recommendations`): a
+`scipy.optimize.minimize(SLSQP)` solver maximises
+`E[log(1 + Σ fᵢ·rᵢ)]` (approximated via Gaussian copula Monte Carlo) in
+full-Kelly space, then post-shrinks by `kelly_lambda · drawdown_mult`
+and enforces `0 ≤ fᵢ ≤ MAX_BET_PCT` and `Σ fᵢ ≤ MAX_EXPOSURE_PCT`.
 `build_simple_correlation()` provides the default correlation matrix
 (same-day off-diagonal ρ = 0.05). Falls back to haircut per-bet Kelly
-when only one bet is passed or the solver fails to converge.
+when the solver fails. Switching `recommendations.py` from the
+sqrt-haircut to `optimize_slate()` is a one-call swap when richer
+correlation data justifies it.
 
 **Closing Line Value (CLV)** is tracked per bet: `bet_market_prob_at_pick`
 is stored by `record_predictions()`, and `update_closing_lines()` fills
@@ -959,8 +969,10 @@ Three tiers of improvements shipped after the hardening pass:
 - **CLV tracking** — `bet_market_prob_at_pick` stored per prediction;
   `update_closing_lines()` computes `clv_logit` post-game. `clv` CLI
   command and `performance` table both surface CLV t-stat.
-- **Slate-level portfolio Kelly** — joint SLSQP optimization with
-  Gaussian copula correlation for correlated same-day bets (see §5.5).
+- **Slate-level portfolio Kelly** (available, not currently wired) —
+  joint SLSQP optimization with Gaussian copula correlation for
+  correlated same-day bets. Production currently uses a closed-form
+  sqrt-haircut on per-bet Kelly (see §5.5).
 - **Signal-dependent Kelly fraction** — edge/CLV/disagreement scaling
   of the base Kelly multiplier, clamped to `[0.25×, 1.25×]` (see §5.5).
 

@@ -21,9 +21,21 @@ _last_request_time = 0.0
 _NBA_TZ = ZoneInfo("America/New_York")
 
 
-def _today_et() -> date:
-    """Return today's date in US Eastern time (NBA scheduling timezone)."""
+def today_et() -> date:
+    """Return today's date in US Eastern time (NBA scheduling timezone).
+
+    Use this anywhere a "today" date interacts with NBA scheduling, the
+    odds_snapshots table (which keys on UTC-derived game_date), or the
+    prediction_history file. ``date.today()`` returns the local system
+    date, which can be a calendar day off from the NBA day for users
+    outside US/Eastern.
+    """
     return datetime.now(_NBA_TZ).date()
+
+
+# Backwards-compat alias — internal callers historically imported the
+# leading-underscore name. Kept so we don't break anything mid-refactor.
+_today_et = today_et
 
 
 def _game_dict_from_v3(g: dict) -> dict:
