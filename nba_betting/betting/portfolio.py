@@ -163,6 +163,17 @@ def optimize_slate(
             "reason": "no positive EV",
         }
 
+    # Effective shrinkage applied to the full-Kelly optimum to get the
+    # output bet fraction. If either factor is zero, no bet is recommended.
+    effective_lambda = kelly_lambda * drawdown_mult
+    if effective_lambda <= 0:
+        return {
+            "fractions": np.zeros(n),
+            "objective": 0.0,
+            "fallback": False,
+            "reason": "zero effective lambda",
+        }
+
     # Work with only positive-EV bets for the optimization, then rebuild
     # the full-length output vector at the end. Keeps the search space
     # tight and avoids the optimizer getting distracted by zero-EV tails.
@@ -179,16 +190,25 @@ def optimize_slate(
     )
 
     # Objective: negative expected log growth (scipy minimizes).
+    # The optimizer searches in *full-Kelly* space (the growth-maximizing
+    # fractions). User-preferred conservatism (kelly_lambda) and the hard
+    # exposure caps are applied post-hoc.
     def neg_elog(f):
         return -_expected_log_growth(f, sub_probs, sub_net_odds, samples)
 
-    x0 = np.clip(per_bet_kelly[positive_mask], 0.0, max_bet_pct)
-    # If the warm-start already exceeds the exposure cap, scale it down.
-    if x0.sum() > max_exposure_pct:
-        x0 = x0 * (max_exposure_pct / x0.sum())
+    # Warm start: per_bet_kelly is already post-lambda (output space), so
+    # divide by effective_lambda to recover the full-Kelly equivalent for
+    # the optimizer.
+    x0 = np.clip(per_bet_kelly[positive_mask] / effective_lambda, 0.0, 1.0)
 
-    bounds = [(0.0, max_bet_pct)] * len(x0)
-    constraints = [{"type": "ineq", "fun": lambda f: max_exposure_pct - np.sum(f)}]
+    # Bounds (0, 1) keep the optimizer well-posed without distorting the
+    # full-Kelly optimum. The hard per-bet cap (max_bet_pct) and exposure
+    # cap (max_exposure_pct) are enforced *after* lambda-shrinkage below.
+    bounds = [(0.0, 1.0)] * len(x0)
+    # Loose sum constraint in full-Kelly space — Σ f ≤ 1 keeps the
+    # optimizer from drifting into nonsense without distorting the optimum
+    # for typical NBA slates.
+    constraints = [{"type": "ineq", "fun": lambda f: 1.0 - np.sum(f)}]
 
     try:
         result = minimize(
@@ -198,10 +218,10 @@ def optimize_slate(
         )
         if not result.success:
             raise RuntimeError(result.message)
-        # Quarter-Kelly-style shrinkage on the full-Kelly optimum.
-        # Without this, the optimizer finds the aggressive full-Kelly
-        # sizing; users configured kelly_lambda for a reason.
-        sub_fractions = result.x * kelly_lambda * drawdown_mult
+        # Shrink the full-Kelly optimum to the user's preferred lambda
+        # (and any active drawdown multiplier), then enforce the hard
+        # per-bet cap.
+        sub_fractions = result.x * effective_lambda
         sub_fractions = np.clip(sub_fractions, 0.0, max_bet_pct)
         # Re-apply the exposure cap post-haircut.
         if sub_fractions.sum() > max_exposure_pct:
