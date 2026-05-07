@@ -117,6 +117,7 @@ def update_results() -> int:
     Also populates closing_market_prob and CLV when snapshot data exists.
     Returns count of records updated.
     """
+    from datetime import timedelta
     from sqlalchemy import select
     from nba_betting.db.models import Game, Team
     from nba_betting.db.session import get_session
@@ -140,17 +141,41 @@ def update_results() -> int:
             if not home_id or not away_id:
                 continue
 
+            record_date = datetime.strptime(record.date, "%Y-%m-%d").date()
             game = session.execute(
                 select(Game).where(
                     Game.home_team_id == home_id,
                     Game.away_team_id == away_id,
-                    Game.date == datetime.strptime(record.date, "%Y-%m-%d").date(),
+                    Game.date == record_date,
                     Game.home_score.isnot(None),
                 )
             ).scalars().first()
 
             if not game:
-                continue
+                # Lenient ±1-day fallback for legacy records filed under the
+                # user's local date instead of ET (the timezone bug fixed in
+                # record_predictions). NBA matchups effectively never repeat
+                # on consecutive calendar days — even in playoffs Game 1 and
+                # Game 2 are typically separated by 2+ days — so a single
+                # ±1-day candidate is overwhelmingly the same game stored
+                # under the ET date. We resolve only when EXACTLY one
+                # candidate exists in the window; ambiguous matches are left
+                # unresolved so we don't silently misattribute outcomes.
+                window_start = record_date - timedelta(days=1)
+                window_end = record_date + timedelta(days=1)
+                candidates = session.execute(
+                    select(Game).where(
+                        Game.home_team_id == home_id,
+                        Game.away_team_id == away_id,
+                        Game.date >= window_start,
+                        Game.date <= window_end,
+                        Game.home_score.isnot(None),
+                    )
+                ).scalars().all()
+                if len(candidates) == 1:
+                    game = candidates[0]
+                else:
+                    continue
 
             record.home_won = game.home_win
 

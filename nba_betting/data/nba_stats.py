@@ -67,17 +67,51 @@ def _rate_limit():
     _last_request_time = time.time()
 
 
+# Season segments that produce official NBA games we want in the model. Order
+# is chronological so concat preserves the natural in-season ordering before
+# dedupe-by-GAME_ID. Pre-season is intentionally excluded (the model is fit
+# on competitive games only).
+_SEASON_SEGMENTS: tuple[str, ...] = ("Regular Season", "PlayIn", "Playoffs")
+
+
 def fetch_season_games(season: str = CURRENT_SEASON) -> pd.DataFrame:
-    """Fetch all team-level game logs for a season."""
+    """Fetch all team-level game logs for a season.
+
+    Unions the Regular Season, Play-In Tournament, and Playoffs segments so
+    the games table covers the full competitive season. Pre-season is
+    intentionally excluded. Each segment is fetched in a separate API call
+    (NBA's LeagueGameLog only accepts one season type per request); failures
+    on a single segment (e.g. Playoffs not yet started) are tolerated and
+    that segment is silently skipped.
+    """
     from nba_api.stats.endpoints import leaguegamelog
 
-    _rate_limit()
-    log = leaguegamelog.LeagueGameLog(
-        season=season,
-        player_or_team_abbreviation="T",
-        season_type_all_star="Regular Season",
-    )
-    return log.get_data_frames()[0]
+    frames: list[pd.DataFrame] = []
+    for segment in _SEASON_SEGMENTS:
+        try:
+            _rate_limit()
+            log = leaguegamelog.LeagueGameLog(
+                season=season,
+                player_or_team_abbreviation="T",
+                season_type_all_star=segment,
+            )
+            seg_df = log.get_data_frames()[0]
+        except Exception:
+            # An empty segment (e.g. playoffs not yet started for the
+            # current season) returns an HTTP error or empty payload.
+            # Treat it as "no games yet" rather than failing the sync.
+            continue
+        if seg_df is not None and not seg_df.empty:
+            frames.append(seg_df)
+
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    # Same GAME_ID can in principle appear under two segments only if NBA's
+    # API misclassifies; defensively dedupe so the sync loop sees one row per
+    # team-game.
+    combined = combined.drop_duplicates(subset=["GAME_ID", "TEAM_ID"], keep="first")
+    return combined
 
 
 def _fetch_v3_games_for_date(target: date) -> list[dict]:
