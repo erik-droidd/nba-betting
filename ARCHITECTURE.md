@@ -96,10 +96,14 @@ nba_betting/
 │                                 PlayerStat, OddsSnapshot tables
 │
 ├── data/
-│   ├── nba_stats.py            — NBA.com client (ScoreboardV3 + LeagueGameFinder).
+│   ├── nba_stats.py            — NBA.com client (ScoreboardV3 + LeagueGameLog).
 │   │                              ⚠ Uses ET timezone via zoneinfo for "today".
 │   │                              ⚠ Never uses live ScoreBoard() — it caches
 │   │                                 stale prior-day data for hours after rollover.
+│   │                              ⚠ fetch_season_games() unions Regular Season
+│   │                                 + Play-In + Playoffs. Pre-fix the call
+│   │                                 only fetched Regular Season, so post-
+│   │                                 April predictions never resolved.
 │   ├── polymarket.py           — Gamma + CLOB clients. Filters closed markets
 │   │                              and extreme (<1%, >99%) prices. Fuzzy
 │   │                              substring fallback in _name_to_abbr()
@@ -690,6 +694,37 @@ on the real-odds path is low. The summary dict now includes
 `real_odds_hits`, `real_odds_misses`, and `real_odds_coverage` so the
 CLI table can show what fraction of test games actually used real
 prices.
+
+### 6.7 Why running `backtest` twice produces identical numbers
+
+`backtest` is **deterministic against the games-table snapshot plus the
+model code**. Three things make this so:
+
+- The walk-forward loop **trains its own per-fold models**. It does not
+  load `gbm_latest.joblib`. Running `train` between two `backtest` runs
+  changes the *saved* model but not the backtest output.
+- `HistGradientBoostingClassifier` is reproducible with a fixed
+  `random_state`, and the SLSQP / Monte Carlo paths use seeded RNGs.
+- The test set is whatever's in the `games` table. If sync hasn't pulled
+  in new games, the test set hasn't moved.
+
+So "same backtest numbers as last week" is the *expected* signal that
+nothing changed in either the data or the algorithm. To meaningfully
+move the metric you need new games (run `sync`), feature/model code
+changes, or different config knobs (`MARKET_SHRINKAGE_LAMBDA`,
+`MIN_BET_SIDE_PROB`, etc.). Re-running `train` alone will not.
+
+### 6.8 `update_results` ±1-day fallback
+
+`record_predictions` now files entries under `today_et()` (the NBA
+scheduling day), but the historical file from before that fix can
+contain entries filed under the user's *local* date for evening sessions
+in non-ET timezones. To recover those legacy records, `update_results`
+falls back to a ±1-day search when the exact-date lookup misses, but
+**only resolves when exactly one candidate exists in the window**. NBA
+matchups don't repeat on consecutive calendar days even in playoffs
+(Game 1 → Game 2 is always 2+ days apart), so the single-candidate rule
+is safe in practice while still ambiguous-resolving the legacy drift.
 
 ---
 
