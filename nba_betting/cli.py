@@ -993,6 +993,32 @@ def simulate(
             "to run_backtest(use_real_odds=...)."
         ),
     ),
+    live_strategy: bool | None = typer.Option(
+        None,
+        "--live-strategy/--no-live-strategy",
+        help=(
+            "Apply the live system's Bayesian shrinkage + bet-side floor in "
+            "the underlying backtest, so the simulated bet pool matches what "
+            "`predict` would actually bet. Defaults to ON — the simulator's "
+            "job is to project the live system, not raw model lift. Pass "
+            "--no-live-strategy to bound raw model skill against the market "
+            "proxy (use `backtest --raw-model` for the canonical version of "
+            "that question)."
+        ),
+    ),
+    horizon: int | None = typer.Option(
+        None,
+        "--horizon",
+        help=(
+            "Bets per simulated path. Defaults to min(200, bet-pool-size) — "
+            "roughly one NBA season of high-conviction bets. The full "
+            "backtest pool is typically ~2000-3000 bets across 3 seasons, "
+            "and compounding a positive per-bet edge over that many bets "
+            "saturates P(Profit) toward 100% regardless of variance, which "
+            "is mathematically correct but operationally useless. Pass an "
+            "explicit value (including the full pool size) to override."
+        ),
+    ),
 ) -> None:
     """Run Monte Carlo simulation of bankroll evolution.
 
@@ -1033,8 +1059,19 @@ def simulate(
         console.print("[red]No data. Run 'sync --seasons 3' first.[/red]")
         raise typer.Exit(1)
 
+    # Resolve --live-strategy / --no-live-strategy. Default ON: the
+    # simulator's job is to project the live system, so the backtest should
+    # mirror what `predict` would actually bet (shrinkage + floor + edge
+    # gate). Users can opt out for raw-model bounding.
+    effective_live_strategy = True if live_strategy is None else live_strategy
+
     console.print("[bold]Running backtest to get bet distribution...[/bold]")
-    bt = run_backtest(X, y, bankroll=bankroll, use_real_odds=real_odds)
+    bt = run_backtest(
+        X, y,
+        bankroll=bankroll,
+        use_real_odds=real_odds,
+        apply_live_strategy=effective_live_strategy,
+    )
     bets = bt["bets"]
 
     if not bets:
@@ -1048,10 +1085,22 @@ def simulate(
     realized_wr = sum(won_outcomes) / len(won_outcomes)
     claimed_wr = sum(model_probs) / len(model_probs)
     console.print(
-        f"[dim]Backtest: {len(bets)} bets, realized win rate "
-        f"{realized_wr:.3f}, model-claimed avg prob {claimed_wr:.3f} "
-        f"(gap {realized_wr - claimed_wr:+.3f}).[/dim]"
+        f"[dim]Backtest: {len(bets)} bets, live_strategy="
+        f"{effective_live_strategy}, real_odds={real_odds}. "
+        f"Realized win rate {realized_wr:.3f}, model-claimed avg prob "
+        f"{claimed_wr:.3f} (gap {realized_wr - claimed_wr:+.3f}).[/dim]"
     )
+
+    # Resolve --horizon. Default: a season's worth of high-conviction bets
+    # (~200). Without a cap, compounding a positive per-bet edge over a
+    # 2000+ backtest pool saturates P(Profit) toward 100% — the math is
+    # correct, but the headline is operationally meaningless to a user
+    # who's betting for a season at a time.
+    _DEFAULT_HORIZON = 200
+    n_bets_per_sim = horizon if horizon is not None else min(_DEFAULT_HORIZON, len(bets))
+    if n_bets_per_sim <= 0:
+        console.print(f"[red]--horizon must be positive, got {horizon}.[/red]")
+        raise typer.Exit(1)
 
     modes_to_run = (
         ["empirical", "market_right"] if mode == "both" else [mode]
@@ -1060,15 +1109,37 @@ def simulate(
     all_results: dict[str, dict] = {}
     for m in modes_to_run:
         console.print(
-            f"[bold]Running {n_sims:,} MC sims ({len(bets)} bets each) — "
-            f"mode={m}...[/bold]"
+            f"[bold]Running {n_sims:,} MC sims ({n_bets_per_sim} bets each, "
+            f"bootstrapped from {len(bets)}-bet pool) — mode={m}...[/bold]"
         )
         all_results[m] = simulate_bankroll(
             model_probs, market_probs,
             won_outcomes=won_outcomes,
             mode=m,
             n_simulations=n_sims,
+            n_bets_per_sim=n_bets_per_sim,
             initial_bankroll=bankroll,
+        )
+
+    # Inflated-edge banner. The single most-useful upfront context for the
+    # user: an Elo-proxy backtest with log-growth/bet > ~0.003 is overstating
+    # real-market edge by a large factor. Print it BEFORE the table so the
+    # 100%-P(Profit) row doesn't get read as a forecast.
+    emp = all_results.get("empirical")
+    _INFLATED_LOG_GROWTH = 0.003  # ~+30bps/bet — generous floor for "real" edge
+    if (
+        emp is not None
+        and not real_odds
+        and emp["median_log_growth_per_bet"] > _INFLATED_LOG_GROWTH
+    ):
+        console.print(
+            "[yellow bold]⚠ Using Elo proxy (no --real-odds). Per ARCHITECTURE "
+            "§6.6, the Elo proxy is systematically weaker than a real "
+            "efficient market — model edge against it is overstated. The "
+            "numbers below are the bootstrap-arithmetic of that overstated "
+            "per-bet edge, NOT a real-world forecast. Look at the gap to "
+            "the Market-is-right column for the skill signal, and rerun "
+            "with --real-odds once odds_snapshots covers the eval window.[/]"
         )
 
     table = Table(
@@ -1104,32 +1175,33 @@ def simulate(
     )
     blank = ["" for _ in modes_to_run]
     table.add_row("", *blank)
-    table.add_row("Median Final Bankroll", *col("median_final_bankroll", as_dollars))
-    table.add_row("Mean Final Bankroll", *col("mean_final_bankroll", as_dollars))
-    table.add_row("5th Percentile", *col("pct_5", as_dollars))
-    table.add_row("25th Percentile", *col("pct_25", as_dollars))
-    table.add_row("75th Percentile", *col("pct_75", as_dollars))
-    table.add_row("95th Percentile", *col("pct_95", as_dollars))
-    table.add_row("", *blank)
-    table.add_row("P(Profit)", *col("probability_of_profit", as_pct))
-    table.add_row("P(Ruin)", *col("probability_of_ruin", as_pct))
-    table.add_row("Median ROI", *col("median_roi", as_pct_signed))
-    table.add_row("Median Max Drawdown", *col("median_max_drawdown", as_pct))
-    table.add_row("Worst Max Drawdown", *col("worst_max_drawdown", as_pct))
-    table.add_row("", *blank)
-    # Horizon-invariant metric — the cleanest statement of skill. Doesn't
-    # explode with n_bets the way compounded bankroll does. Positive gap
-    # between empirical and market-null is the honest edge signal.
+    # Horizon-invariant skill metrics first — these are the honest read.
+    # log-growth/bet doesn't compound with n_bets, so a real +0.005 edge
+    # stays at +0.005 whether you sim 200 or 2000 bets. The compounded
+    # bankroll percentiles below DO scale with horizon and are mainly a
+    # bankroll-sizing illustration, not a forecast.
     table.add_row(
         "Median Log-Growth / Bet", *col("median_log_growth_per_bet", as_logret)
     )
     table.add_row(
         "Mean Log-Growth / Bet", *col("mean_log_growth_per_bet", as_logret)
     )
+    table.add_row("P(Ruin)", *col("probability_of_ruin", as_pct))
+    table.add_row("Median Max Drawdown", *col("median_max_drawdown", as_pct))
+    table.add_row("Worst Max Drawdown", *col("worst_max_drawdown", as_pct))
+    table.add_row("", *blank)
+    # Horizon-dependent illustration (clearly labeled).
+    horizon_label = f"@ horizon={n_bets_per_sim} bets"
+    table.add_row(f"P(Profit) {horizon_label}", *col("probability_of_profit", as_pct))
+    table.add_row(f"Median ROI {horizon_label}", *col("median_roi", as_pct_signed))
+    table.add_row(f"Median Bankroll {horizon_label}", *col("median_final_bankroll", as_dollars))
+    table.add_row(f"5th Percentile {horizon_label}", *col("pct_5", as_dollars))
+    table.add_row(f"25th Percentile {horizon_label}", *col("pct_25", as_dollars))
+    table.add_row(f"75th Percentile {horizon_label}", *col("pct_75", as_dollars))
+    table.add_row(f"95th Percentile {horizon_label}", *col("pct_95", as_dollars))
 
     console.print(table)
 
-    emp = all_results.get("empirical")
     mkt = all_results.get("market_right")
 
     if emp is not None:
@@ -1137,11 +1209,6 @@ def simulate(
             console.print(
                 "[red]WARNING: empirical ruin probability > 10%. "
                 "Lower the Kelly fraction or raise the edge threshold.[/red]"
-            )
-        if emp["probability_of_profit"] > 0.6:
-            console.print(
-                f"[green]Empirical: profitable in "
-                f"{emp['probability_of_profit']:.0%} of paths.[/green]"
             )
     if mkt is not None and emp is not None:
         # Horizon-invariant gap: doesn't blow up with n_bets the way
@@ -1152,13 +1219,11 @@ def simulate(
             emp["median_log_growth_per_bet"]
             - mkt["median_log_growth_per_bet"]
         )
-        roi_gap = emp["median_roi"] - mkt["median_roi"]
         console.print(
-            f"[dim]Edge vs market-null: log-growth/bet gap = "
-            f"{log_gap:+.4f} (~{log_gap * 100:+.2f}% per bet). "
-            f"Compounded median-ROI gap = {roi_gap:+.1%} over "
-            f"{emp['n_bets_per_sim']} bets. Positive gap is evidence of "
-            f"real edge (not just Kelly compounding).[/dim]"
+            f"[dim]Skill signal (horizon-invariant): empirical log-growth/bet "
+            f"vs market-null gap = {log_gap:+.4f} (~{log_gap * 100:+.2f}% per "
+            f"bet). Positive gap is evidence of real edge over the market "
+            f"used in this backtest.[/dim]"
         )
     if not real_odds:
         console.print(
