@@ -746,6 +746,49 @@ should never need the fallback — they should resolve via the exact
 match — so a sustained uptick in fallback-resolved records would be
 a signal that something upstream is misfiling dates again.
 
+### 6.9 Why the `simulate` defaults look the way they do
+
+The Monte Carlo `simulate` CLI bootstraps `(p_model, p_market, won)`
+tuples from a backtest's bet pool. Two defaults need explicit
+explanation because they materially shape what users see:
+
+**`--horizon` defaults to `min(200, len(bets))`.** A real NBA bettor
+places ~150–250 high-conviction bets per season at the configured
+edge floor. The full backtest pool (3 seasons of bets, ~2000–3000
+bets) is *not* the right forward-looking horizon. With the model's
+realized log-growth/bet ~ +0.005 against the Elo proxy, compounding
+2000+ bets at any positive drift saturates `P(Profit) → ~100%` by
+arithmetic alone — mathematically correct, operationally useless.
+The 200-bet default keeps variance visible (P(Profit) drops from
+~100% to ~95% at horizon=200, ~75% at horizon=50), so the percentile
+distribution actually informs decisions. Override with
+`--horizon N` when you specifically want the full-pool compounding
+behavior (e.g. for backtest reproduction).
+
+**`--live-strategy` defaults to ON.** The simulator's job is to
+project the *live system* — what `predict` would actually do — not
+to bound raw model skill. Defaulting `apply_live_strategy=True` in
+the underlying backtest applies the same Bayesian shrinkage and
+asymmetric bet-side floor that live betting does, so the bet pool
+the bootstrap draws from matches reality. Pass `--no-live-strategy`
+to recover the raw-model bounding behavior (or use
+`backtest --raw-model` for the canonical version of that question;
+see §6.6).
+
+**Inflated-edge banner.** When `--real-odds` is off (Elo proxy used)
+AND the empirical log-growth/bet exceeds ~0.003 (≈30bps/bet), a
+warning banner prints before the table noting that the numbers are
+arithmetic of an overstated per-bet edge, not a real-world forecast.
+The market-is-right column is the apples-to-apples skill comparison
+in that regime.
+
+**Headline is `log-growth/bet`, not `P(Profit)`.** Compounded
+metrics scale with horizon; log-growth/bet does not. The latter is
+the honest, comparable measure of skill across horizons and against
+the market-null. The table puts horizon-invariant metrics first and
+labels every horizon-dependent metric with `@ horizon=N bets` so
+the dependency is unambiguous.
+
 ---
 
 ## 7. Config knobs (`nba_betting/config.py`)
