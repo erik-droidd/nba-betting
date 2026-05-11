@@ -131,18 +131,101 @@ def test_short_horizon_exposes_downside_that_full_pool_hides():
     ) < 0.002, "log-growth/bet should be roughly horizon-invariant"
 
 
-def test_default_horizon_constant_is_one_season_ish():
-    """The default-horizon constant in cli.simulate must be in the
-    100-300 range. Below 100 loses statistical signal; above 300 starts
-    re-saturating P(Profit) on an Elo-proxy edge.
+# ---------------------------------------------------------------------------
+# Default horizon is now date-density derived — replaces the prior
+# `_DEFAULT_HORIZON = 200` constant. The cap was arbitrary: a heavy bettor
+# saw a horizon ~half a season's worth, a selective bettor saw three
+# seasons in a single horizon. The data-driven default fixes both edges.
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_bets(start_date: str, span_days: int, bets_per_day: float) -> list[dict]:
+    """Build a synthetic backtest bet list with controlled date density.
+
+    Each returned dict has a ``"date"`` field (the only field
+    ``_estimate_one_season_bets`` reads). Bets are spread linearly across
+    the span so ``len(out) / span_days == bets_per_day`` to within rounding.
     """
-    import re
-    from nba_betting import cli
-    source = inspect.getsource(cli.simulate)
-    m = re.search(r"_DEFAULT_HORIZON\s*=\s*(\d+)", source)
-    assert m is not None, "couldn't find _DEFAULT_HORIZON constant in cli.simulate"
-    value = int(m.group(1))
-    assert 100 <= value <= 300, (
-        f"_DEFAULT_HORIZON should be in the 100-300 range "
-        f"(~one season of high-conviction bets), got {value}"
+    from datetime import date, timedelta
+    start = date.fromisoformat(start_date)
+    n_total = round(span_days * bets_per_day)
+    return [
+        {"date": (start + timedelta(days=round(i * span_days / max(n_total, 1)))).isoformat()}
+        for i in range(n_total)
+    ]
+
+
+def test_estimate_one_season_projects_density_over_240_days():
+    """A 3-season backtest at 2 bets/day → ~480 bets/season default."""
+    from nba_betting.cli import _estimate_one_season_bets
+
+    bets = _synthetic_bets("2023-01-01", span_days=900, bets_per_day=2.0)
+    horizon, reason = _estimate_one_season_bets(bets)
+    # 240 days × 2 bets/day = 480, allow rounding slop.
+    assert 450 <= horizon <= 510, (
+        f"3-season × 2 bets/day backtest should project to ~480 bets/season, "
+        f"got {horizon} ({reason})"
     )
+    assert "season" in reason.lower()
+
+
+def test_estimate_one_season_scales_with_bet_rate():
+    """Selective bettor (0.5 bets/day) → smaller horizon than heavy
+    bettor (5 bets/day), both for the same backtest span.
+
+    This is the property the old fixed 200 cap couldn't deliver: it gave
+    every user the same horizon regardless of how often they bet.
+    """
+    from nba_betting.cli import _estimate_one_season_bets
+
+    selective = _synthetic_bets("2023-01-01", span_days=900, bets_per_day=0.5)
+    heavy = _synthetic_bets("2023-01-01", span_days=900, bets_per_day=5.0)
+
+    h_selective, _ = _estimate_one_season_bets(selective)
+    h_heavy, _ = _estimate_one_season_bets(heavy)
+
+    assert h_heavy > h_selective * 5, (
+        f"heavy bettor should have ≥5× the horizon of a selective one, "
+        f"got selective={h_selective}, heavy={h_heavy}"
+    )
+
+
+def test_estimate_one_season_falls_back_to_pool_for_short_backtest():
+    """A 2-week backtest's density would extrapolate absurdly — fall back
+    to the full pool and surface the reason so the user knows.
+    """
+    from nba_betting.cli import _estimate_one_season_bets
+
+    bets = _synthetic_bets("2023-01-01", span_days=14, bets_per_day=3.0)
+    horizon, reason = _estimate_one_season_bets(bets)
+    assert horizon == len(bets), (
+        f"short backtests should fall back to full pool, got horizon={horizon} "
+        f"vs pool={len(bets)}"
+    )
+    assert "full pool" in reason.lower()
+
+
+def test_estimate_one_season_caps_at_pool_size():
+    """If the projection exceeds the available pool (rare but possible
+    with a short, dense backtest like 60 days at 4 bets/day), cap at the
+    pool size rather than oversample.
+    """
+    from nba_betting.cli import _estimate_one_season_bets
+
+    # 60 days × 4 bets/day = 240 bets, projection wants 240×4 = 960.
+    bets = _synthetic_bets("2023-01-01", span_days=60, bets_per_day=4.0)
+    horizon, _ = _estimate_one_season_bets(bets)
+    assert horizon <= len(bets), (
+        f"horizon must never exceed pool size, got horizon={horizon} "
+        f"vs pool={len(bets)}"
+    )
+
+
+def test_estimate_one_season_handles_missing_or_bad_dates():
+    """Unparseable date field shouldn't crash — fall back to pool size."""
+    from nba_betting.cli import _estimate_one_season_bets
+
+    bets = [{"date": "not-a-date"} for _ in range(50)]
+    horizon, reason = _estimate_one_season_bets(bets)
+    assert horizon == len(bets)
+    assert "full pool" in reason.lower()

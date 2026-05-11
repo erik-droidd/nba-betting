@@ -752,18 +752,39 @@ The Monte Carlo `simulate` CLI bootstraps `(p_model, p_market, won)`
 tuples from a backtest's bet pool. Two defaults need explicit
 explanation because they materially shape what users see:
 
-**`--horizon` defaults to `min(200, len(bets))`.** A real NBA bettor
-places ~150–250 high-conviction bets per season at the configured
-edge floor. The full backtest pool (3 seasons of bets, ~2000–3000
-bets) is *not* the right forward-looking horizon. With the model's
+**`--horizon` defaults to a date-density projection over one NBA
+season (~240 days, regular + playoffs).** Implemented by
+`_estimate_one_season_bets()` in `nba_betting/cli.py`: compute the
+backtest's bet density `pool_size / span_days`, multiply by 240, then
+clip to `[20, pool_size]`. Each invocation prints the chosen horizon
+plus a one-line reason so the user can see what density was inferred.
+
+This replaced the prior fixed cap `min(200, len(bets))`, which was
+arbitrary in two failure modes:
+
+- A **heavy bettor** (e.g. 4 bets/day on every slate) has ~960 bets
+  per season — capping at 200 hid the bulk of a realistic season's
+  variance.
+- A **selective bettor** (e.g. 0.3 bets/day after raising the edge
+  floor) has ~70 bets per season — the 200 cap then bunched three
+  seasons of bets into a single horizon, re-saturating P(Profit).
+
+The full backtest pool (typically 3 seasons of bets) is also not the
+right forward-looking horizon for end users: with the model's
 realized log-growth/bet ~ +0.005 against the Elo proxy, compounding
 2000+ bets at any positive drift saturates `P(Profit) → ~100%` by
-arithmetic alone — mathematically correct, operationally useless.
-The 200-bet default keeps variance visible (P(Profit) drops from
-~100% to ~95% at horizon=200, ~75% at horizon=50), so the percentile
-distribution actually informs decisions. Override with
-`--horizon N` when you specifically want the full-pool compounding
-behavior (e.g. for backtest reproduction).
+arithmetic alone — mathematically correct, operationally useless. The
+date-density default targets a horizon where the percentile
+distribution actually informs decisions.
+
+Fallback behavior: backtests with fewer than two distinct dates, an
+unparseable `"date"` field, or a span < 30 days fall back to the full
+pool (extrapolating bet density from a 2-week window would inflate
+the projected horizon by 10×+). The CLI surfaces the fallback reason
+in its rationale line.
+
+Override with `--horizon N` when you want a specific value (including
+the full pool size for the original compounded behavior).
 
 **`--live-strategy` defaults to ON.** The simulator's job is to
 project the *live system* — what `predict` would actually do — not
