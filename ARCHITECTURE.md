@@ -716,15 +716,35 @@ changes, or different config knobs (`MARKET_SHRINKAGE_LAMBDA`,
 
 ### 6.8 `update_results` ±1-day fallback
 
-`record_predictions` now files entries under `today_et()` (the NBA
-scheduling day), but the historical file from before that fix can
-contain entries filed under the user's *local* date for evening sessions
-in non-ET timezones. To recover those legacy records, `update_results`
-falls back to a ±1-day search when the exact-date lookup misses, but
-**only resolves when exactly one candidate exists in the window**. NBA
-matchups don't repeat on consecutive calendar days even in playoffs
-(Game 1 → Game 2 is always 2+ days apart), so the single-candidate rule
-is safe in practice while still ambiguous-resolving the legacy drift.
+`record_predictions` now files each entry under the *game's* ET date,
+taken from `BetRecommendation.game_date` (which
+`generate_recommendations` derives from the game's UTC tipoff via
+`game_date_et()`). This is the same convention `Game.date` uses, so
+the exact-date match in `update_results` resolves predictions cleanly
+— including for upcoming-day slates where `today_et()` ≠ the game's
+date (predict-on-a-quiet-night → next-day games).
+
+The ±1-day fallback is now **mostly defensive** for very old records
+that pre-date the per-game-date fix — two historical drift modes are
+covered:
+
+1. **Local-date drift**: pre-PR-#13, `record_predictions` used
+   `date.today()` instead of `today_et()`, so evening sessions in
+   non-ET timezones filed records under tomorrow-local while the game
+   was stored under today-ET.
+2. **Prediction-run-date drift**: pre-this-fix, even after PR #13 the
+   record was filed under `today_et()` rather than the game's ET
+   date, which broke matching whenever the slate was for an upcoming
+   day. The 15 stuck `2026-04-10 → 2026-04-12` records in our
+   real history are this category.
+
+The fallback resolves only when **exactly one candidate** exists in
+the window. NBA matchups don't repeat on consecutive calendar days
+even in playoffs (Game 1 → Game 2 is always 2+ days apart), so the
+single-candidate rule is safe. New predictions written under this fix
+should never need the fallback — they should resolve via the exact
+match — so a sustained uptick in fallback-resolved records would be
+a signal that something upstream is misfiling dates again.
 
 ---
 

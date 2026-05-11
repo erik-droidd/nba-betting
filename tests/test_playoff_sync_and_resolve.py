@@ -326,3 +326,211 @@ def test_update_results_exact_date_still_preferred_over_fallback(tmp_path, monke
     # be -bet_size. This pins the correct precedence.
     assert resolved["home_won"] is True
     assert resolved["profit"] == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — per-game game_date on BetRecommendation so record_predictions
+# files predictions under the game's actual ET date, not the prediction-run
+# date. Without this, evening sessions that draw the next-available slate
+# (e.g. predict-on-April-10 returning April-12 games) end up with records
+# the resolver can never match — even with the ±1-day fallback, because
+# the gap is 2+ days.
+# ---------------------------------------------------------------------------
+
+
+def _build_min_rec(**overrides):
+    """Construct a BetRecommendation with just enough fields populated for
+    record_predictions to serialize it. Tests override specific fields.
+    """
+    from nba_betting.betting.recommendations import BetRecommendation
+    defaults = dict(
+        home_team="AAA",
+        away_team="BBB",
+        model_home_prob=0.6,
+        market_home_prob=0.5,
+        bet_side="HOME",
+        edge=0.05,
+        ev_per_dollar=0.05,
+        kelly_pct=0.02,
+        bet_size=10.0,
+        badge="STRONG",
+    )
+    defaults.update(overrides)
+    return BetRecommendation(**defaults)
+
+
+def _stub_recommendation_deps(monkeypatch):
+    """Neutralize the I/O dependencies of `generate_recommendations` so it
+    runs in a hermetic test: no DB for Kelly drawdown, no injuries file,
+    no explanation that touches injuries.
+    """
+    from nba_betting.betting import recommendations as rec_module
+
+    monkeypatch.setattr(rec_module, "get_recent_roi", lambda lookback=10: (0.0, 0))
+    # `get_team_injury_adjustment` and `generate_explanation` are imported
+    # lazily inside the function body, so patch them at the source modules.
+    import nba_betting.data.injuries as _inj
+    import nba_betting.betting.explanations as _expl
+    monkeypatch.setattr(_inj, "get_team_injury_adjustment", lambda team_abbr: 0.0)
+    monkeypatch.setattr(_inj, "load_injuries", lambda: [])
+    monkeypatch.setattr(_expl, "generate_explanation", lambda *a, **k: "")
+
+
+def test_generate_recommendations_populates_game_date_in_et(monkeypatch):
+    """The recommendation should carry the game's ET calendar date, not
+    the UTC date — because `Game.date` in the DB is ET-derived (parsed
+    from NBA's GAME_DATE column) and `update_results` matches by it.
+
+    Pin with a late-night ET tipoff so the UTC date is one calendar day
+    ahead. If the code used raw ``game_time_utc[:10]`` it would return
+    the UTC day and the test would fail.
+    """
+    from nba_betting.betting import recommendations as rec_module
+    _stub_recommendation_deps(monkeypatch)
+
+    game = {
+        "home_team_abbr": "AAA",
+        "away_team_abbr": "BBB",
+        "home_team_id": 1,
+        "away_team_id": 2,
+        # 01:30 UTC on Apr 13 == 21:30 ET on Apr 12 — UTC date and ET date
+        # differ, so the assertion below proves we converted to ET.
+        "game_time_utc": "2026-04-13T01:30:00Z",
+    }
+
+    def stub_predict(home_elo, away_elo):
+        return 0.55
+
+    recs = rec_module.generate_recommendations(
+        games=[game],
+        elos={1: 1500.0, 2: 1500.0},
+        market_odds=[],
+        bankroll=1000.0,
+        predict_fn=stub_predict,
+    )
+    assert len(recs) == 1
+    assert recs[0].game_date == "2026-04-12", (
+        f"expected ET-converted game date 2026-04-12 for 21:30 ET tipoff, "
+        f"got {recs[0].game_date!r}"
+    )
+
+
+def test_generate_recommendations_falls_back_to_today_et_when_game_time_utc_missing(monkeypatch):
+    """A game record without a parseable ``game_time_utc`` (or missing the
+    field entirely) should fall back to ``today_et()`` so we still record
+    SOMETHING usable. The pre-fix behavior was always today_et()
+    regardless, so this is the documented degenerate case.
+    """
+    from nba_betting.betting import recommendations as rec_module
+    from nba_betting.data import nba_stats
+    _stub_recommendation_deps(monkeypatch)
+
+    # Pin "today" to a known date so the assertion is deterministic.
+    monkeypatch.setattr(nba_stats, "today_et", lambda: date(2026, 4, 10))
+
+    game = {
+        "home_team_abbr": "AAA",
+        "away_team_abbr": "BBB",
+        "home_team_id": 1,
+        "away_team_id": 2,
+        # game_time_utc deliberately omitted
+    }
+
+    def stub_predict(home_elo, away_elo):
+        return 0.55
+
+    recs = rec_module.generate_recommendations(
+        games=[game],
+        elos={1: 1500.0, 2: 1500.0},
+        market_odds=[],
+        bankroll=1000.0,
+        predict_fn=stub_predict,
+    )
+    assert len(recs) == 1
+    assert recs[0].game_date == "2026-04-10"
+
+
+def test_record_predictions_files_under_per_game_date(tmp_path, monkeypatch):
+    """The core of bug #3: when a recommendation knows its game_date,
+    ``record_predictions`` must file the record under THAT date — not
+    ``today_et()``. Without this, predictions on a future-slate game
+    end up under the prediction-run date and ``update_results`` can't
+    match them later (the gap is too wide for the ±1-day fallback).
+    """
+    session_module, tracker, history_path = _setup_isolated_state(tmp_path, monkeypatch)
+    _seed_team_pair(session_module)
+
+    # Pin today to one date and the game to a different one. If the code
+    # falls back to today_et() despite game_date being set, the assertion
+    # below catches it.
+    from nba_betting.data import nba_stats
+    monkeypatch.setattr(nba_stats, "today_et", lambda: date(2026, 4, 10))
+
+    rec = _build_min_rec(game_date="2026-04-12")
+    n = tracker.record_predictions([rec])
+    assert n == 1
+
+    saved = json.loads(history_path.read_text())
+    assert len(saved) == 1
+    assert saved[0]["date"] == "2026-04-12", (
+        f"record should be filed under the game's date (2026-04-12), "
+        f"not today_et() (2026-04-10) — got {saved[0]['date']!r}"
+    )
+
+
+def test_record_predictions_falls_back_to_today_et_when_game_date_missing(tmp_path, monkeypatch):
+    """Backwards-compat: a BetRecommendation without ``game_date`` set
+    should file under ``today_et()`` (the legacy behavior). Older callers
+    that haven't been updated still work.
+    """
+    session_module, tracker, history_path = _setup_isolated_state(tmp_path, monkeypatch)
+    _seed_team_pair(session_module)
+
+    from nba_betting.data import nba_stats
+    monkeypatch.setattr(nba_stats, "today_et", lambda: date(2026, 4, 10))
+
+    rec = _build_min_rec()  # game_date defaults to None
+    n = tracker.record_predictions([rec])
+    assert n == 1
+
+    saved = json.loads(history_path.read_text())
+    assert saved[0]["date"] == "2026-04-10"
+
+
+def test_update_results_resolves_future_slate_prediction_by_exact_date(tmp_path, monkeypatch):
+    """End-to-end: when ``record_predictions`` files a future-slate game
+    under its actual ET date, ``update_results`` resolves it via the
+    EXACT-date match — no need for the ±1-day fallback. This is the
+    happy-path the fix unlocks for predict-on-quiet-night → next-day-game
+    workflows.
+    """
+    session_module, tracker, history_path = _setup_isolated_state(tmp_path, monkeypatch)
+    _seed_team_pair(session_module)
+
+    # Game stored at its actual ET date (2 days after the prediction was run).
+    _seed_game(
+        session_module, game_id="g1", when=date(2026, 4, 12),
+        home_id=1, away_id=2, home_score=110, away_score=100,
+    )
+
+    # Simulate what `record_predictions` will do under the fix: file the
+    # record under the game's ET date even though "today" is two days
+    # earlier. The dedupe key inside record_predictions must also use the
+    # per-game date so re-running predict on the same upcoming slate is a
+    # no-op rather than a duplicate.
+    from nba_betting.data import nba_stats
+    monkeypatch.setattr(nba_stats, "today_et", lambda: date(2026, 4, 10))
+
+    rec = _build_min_rec(game_date="2026-04-12")
+    saved_first = tracker.record_predictions([rec])
+    saved_second = tracker.record_predictions([rec])  # idempotent
+    assert saved_first == 1
+    assert saved_second == 0, "re-recording same upcoming-game rec must dedupe"
+
+    n = tracker.update_results()
+    assert n == 1
+    resolved = json.loads(history_path.read_text())[0]
+    assert resolved["date"] == "2026-04-12"
+    assert resolved["home_won"] is True
+    # Bet HOME at 0.5 (decimal 2.0) and won → +bet_size profit.
+    assert resolved["profit"] == pytest.approx(10.0)
