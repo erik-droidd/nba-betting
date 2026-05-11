@@ -972,7 +972,7 @@ def backtest(
 
 @app.command()
 def simulate(
-    n_sims: int = typer.Option(10_000, help="Number of Monte Carlo simulations"),
+    n_sims: int = typer.Option(60_000, help="Number of Monte Carlo simulations"),
     bankroll: float = typer.Option(DEFAULT_BANKROLL, help="Starting bankroll"),
     mode: str = typer.Option(
         "both",
