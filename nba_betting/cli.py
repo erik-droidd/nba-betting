@@ -970,6 +970,60 @@ def backtest(
                   f"({summary['roi']:+.1%} ROI over {summary['total_bets']} bets)[/dim]")
 
 
+# Length of an NBA betting season in calendar days — Oct → mid-June, regular
+# season plus playoffs. Used to project the backtest's observed bet density
+# onto a "one season for me" forward-looking horizon in `simulate`.
+_NBA_SEASON_DAYS = 240
+
+# Minimum default horizon. Below ~20 bets the MC percentile distribution is
+# noisy and the user gets less signal than they would from a single backtest.
+_MIN_DEFAULT_HORIZON = 20
+
+
+def _estimate_one_season_bets(bets: list[dict]) -> tuple[int, str]:
+    """Estimate "how many bets does one NBA season produce for me?"
+
+    Replaces the previous fixed 200-bet horizon, which was arbitrary and
+    didn't adapt: a heavy bettor (high bet rate) saw a horizon ~half a
+    season; a selective bettor (high edge threshold) saw three seasons in
+    one horizon. Date-density-based estimation fixes both edges.
+
+    Returns ``(horizon, reason)`` so the CLI can surface *why* the chosen
+    horizon is what it is in the dim header line above the table.
+    """
+    from datetime import datetime
+
+    pool_size = len(bets)
+    try:
+        dates = sorted({
+            datetime.strptime(b["date"], "%Y-%m-%d").date()
+            for b in bets if "date" in b
+        })
+    except (ValueError, TypeError):
+        return pool_size, "full pool (bet dates unparseable)"
+
+    if len(dates) < 2:
+        return pool_size, "full pool (insufficient date range)"
+
+    span_days = max((dates[-1] - dates[0]).days, 1)
+    if span_days < 30:
+        # Backtest spans less than a month — extrapolating bet density to
+        # 8 months would overstate horizon by 10x+. Just use the pool.
+        return pool_size, f"full pool (backtest spans only {span_days} days)"
+
+    bets_per_day = pool_size / span_days
+    estimated = round(bets_per_day * _NBA_SEASON_DAYS)
+    horizon = max(_MIN_DEFAULT_HORIZON, min(estimated, pool_size))
+
+    return (
+        horizon,
+        (
+            f"≈ one NBA season at {bets_per_day:.2f} bets/day "
+            f"(backtest density over {span_days} days)"
+        ),
+    )
+
+
 @app.command()
 def simulate(
     n_sims: int = typer.Option(60_000, help="Number of Monte Carlo simulations"),
@@ -1010,13 +1064,12 @@ def simulate(
         None,
         "--horizon",
         help=(
-            "Bets per simulated path. Defaults to min(200, bet-pool-size) — "
-            "roughly one NBA season of high-conviction bets. The full "
-            "backtest pool is typically ~2000-3000 bets across 3 seasons, "
-            "and compounding a positive per-bet edge over that many bets "
-            "saturates P(Profit) toward 100% regardless of variance, which "
-            "is mathematically correct but operationally useless. Pass an "
-            "explicit value (including the full pool size) to override."
+            "Bets per simulated path. Defaults to the backtest's observed "
+            "bet density projected onto one NBA season (~240 days, "
+            "regular + playoffs) — so a heavy bettor gets a longer "
+            "horizon than a selective one. Pass an explicit value "
+            "(including the full bet-pool size for the original "
+            "compounded behavior) to override."
         ),
     ),
 ) -> None:
@@ -1091,16 +1144,24 @@ def simulate(
         f"{claimed_wr:.3f} (gap {realized_wr - claimed_wr:+.3f}).[/dim]"
     )
 
-    # Resolve --horizon. Default: a season's worth of high-conviction bets
-    # (~200). Without a cap, compounding a positive per-bet edge over a
-    # 2000+ backtest pool saturates P(Profit) toward 100% — the math is
-    # correct, but the headline is operationally meaningless to a user
-    # who's betting for a season at a time.
-    _DEFAULT_HORIZON = 200
-    n_bets_per_sim = horizon if horizon is not None else min(_DEFAULT_HORIZON, len(bets))
+    # Resolve --horizon. Default: project the backtest's observed bet
+    # density onto one NBA season (~240 days, regular + playoffs). This
+    # adapts to the user's actual bet rate — a heavy bettor gets a longer
+    # horizon than a selective one — instead of the prior fixed 200-bet
+    # cap, which under-counted heavy bettors and over-counted selective
+    # ones. See ARCHITECTURE.md §6.9 for the rationale.
+    if horizon is None:
+        n_bets_per_sim, horizon_reason = _estimate_one_season_bets(bets)
+    else:
+        n_bets_per_sim = horizon
+        horizon_reason = "user-supplied via --horizon"
     if n_bets_per_sim <= 0:
         console.print(f"[red]--horizon must be positive, got {horizon}.[/red]")
         raise typer.Exit(1)
+    console.print(
+        f"[dim]Default horizon: {n_bets_per_sim} bets — "
+        f"{horizon_reason}.[/dim]"
+    )
 
     modes_to_run = (
         ["empirical", "market_right"] if mode == "both" else [mode]
