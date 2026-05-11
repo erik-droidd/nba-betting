@@ -53,6 +53,17 @@ class BetRecommendation:
     spread_edge: float = 0.0
     total_pick: str = "NO BET"
     total_edge: float = 0.0
+    # ET calendar date of the scheduled game (``YYYY-MM-DD``). Carried on
+    # the recommendation so ``record_predictions`` can file each record
+    # under the game's actual date — critical when the slate is for an
+    # upcoming day (e.g. predict-on-a-quiet-night returns tomorrow's
+    # games) and the prediction-run date is therefore different from the
+    # game's date. ``update_results`` matches predictions to games by
+    # ``Game.date``, which is ET-derived (NBA's ``GAME_DATE`` column), so
+    # the value stored here must be the ET date and not the raw UTC date
+    # off ``game_time_utc[:10]``. ``None`` means "caller didn't set it,"
+    # in which case ``record_predictions`` falls back to ``today_et()``.
+    game_date: str | None = None
 
 
 def generate_recommendations(
@@ -251,6 +262,18 @@ def generate_recommendations(
                 except Exception:
                     drivers = None  # Non-critical; explanation falls back to heuristic
 
+        # Per-game ET date for tracker bookkeeping. ``game_date_et``
+        # converts the UTC tipoff timestamp to the NBA scheduling day,
+        # which is the same convention ``Game.date`` uses in the DB —
+        # so ``update_results`` can match the saved prediction back to
+        # the completed game. Late-night ET tipoffs (e.g. 9:30 PM ET)
+        # have a UTC date one day ahead, so using raw
+        # ``game_time_utc[:10]`` would silently miss for those games.
+        # Fall back to ``today_et()`` only when the game record lacks a
+        # parseable timestamp — the legacy degenerate case.
+        from nba_betting.data.nba_stats import today_et
+        rec_game_date = game_date_et(game) or str(today_et())
+
         rec = BetRecommendation(
             home_team=home_abbr,
             away_team=away_abbr,
@@ -268,6 +291,7 @@ def generate_recommendations(
             away_injury_adj=away_inj_adj,
             shrunken_home_prob=shrunken_home_prob,
             drivers=drivers,
+            game_date=rec_game_date,
         )
 
         # Spread / total picks (if regressors are loaded and produced a

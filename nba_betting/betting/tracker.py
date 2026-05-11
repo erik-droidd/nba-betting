@@ -50,17 +50,34 @@ def save_history(records: list[PredictionRecord]) -> None:
 
 
 def record_predictions(recommendations) -> int:
-    """Save today's predictions to history. Returns count of new records."""
+    """Save today's predictions to history. Returns count of new records.
+
+    Each record is filed under the *game's* ET date (taken from
+    ``rec.game_date``, which ``generate_recommendations`` populates from
+    the game's UTC tipoff converted to ET). When the recommendation
+    doesn't carry a ``game_date`` — e.g. an older caller or a test
+    fixture — we fall back to ``today_et()`` for back-compat.
+
+    Filing under the per-game date matters for *upcoming-slate*
+    predictions: when ``predict`` is run on a quiet night and
+    ``fetch_upcoming_games`` returns games 1-3 days out, ``today_et()``
+    is the prediction-run date but ``Game.date`` for that game won't
+    be today — ``update_results`` would never match.
+    """
     from nba_betting.data.nba_stats import today_et
 
     history = load_history()
-    # Use the NBA scheduling day (US/Eastern), so the history key matches
-    # the date stored on Game rows and the snapshot game_date column. A
-    # local-system `date.today()` would skew the key for non-ET users.
+    # Cached "today" used both as the CLV-snapshot key (snapshots are
+    # written at predict-time, so today is when "opening" gets captured)
+    # and as the per-rec fallback when a recommendation has no game_date.
     today_date = today_et()
     today = str(today_date)
 
-    # Don't duplicate
+    # Dedupe by (per-game-date, home, away) so re-running predict on the
+    # same upcoming slate is a no-op rather than a duplicate. Keying on
+    # the per-game date (instead of today) also means a single history
+    # file can carry distinct entries for the same matchup played across
+    # different days (e.g. back-to-back playoff games) without colliding.
     existing_keys = {(r.date, r.home_team, r.away_team) for r in history}
 
     # Fetch opening lines from snapshots for CLV tracking (best-effort).
@@ -87,12 +104,13 @@ def record_predictions(recommendations) -> int:
 
     new_count = 0
     for rec in recommendations:
-        key = (today, rec.home_team, rec.away_team)
+        rec_date = getattr(rec, "game_date", None) or today
+        key = (rec_date, rec.home_team, rec.away_team)
         if key in existing_keys:
             continue
 
         history.append(PredictionRecord(
-            date=today,
+            date=rec_date,
             home_team=rec.home_team,
             away_team=rec.away_team,
             model_home_prob=rec.model_home_prob,
@@ -104,6 +122,10 @@ def record_predictions(recommendations) -> int:
                 (rec.home_team, rec.away_team),
             ),
         ))
+        # Keep existing_keys in sync inside the loop so duplicates within
+        # a single call (e.g. two recs for the same matchup) don't both
+        # land in history.
+        existing_keys.add(key)
         new_count += 1
 
     save_history(history)
