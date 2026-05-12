@@ -4,3 +4,5 @@
 {"game_date":"2026-05-12","home_team_abbr":"LAL","away_team_abbr":"OKC","source":"espn","timestamp":"2026-05-12T00:06:15","home_prob":0.1875,"spread":12.5,"over_under":214.5,"game_id":null}
 {"game_date":"2026-05-13","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-12T03:52:17","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-05-13","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-12T05:47:06","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-13","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-05-12T15:44:29","home_prob":0.775,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-05-13","home_team_abbr":"SAS","away_team_abbr":"MIN","source":"espn","timestamp":"2026-05-12T15:44:29","home_prob":0.7375,"spread":-9.5,"over_under":218.5,"game_id":null}
