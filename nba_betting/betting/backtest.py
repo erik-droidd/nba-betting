@@ -16,6 +16,7 @@ from nba_betting.config import (
     MIN_BET_SIDE_PROB,
     ELO_HOME_ADVANTAGE,
 )
+from nba_betting.models.calibration import calibrate_model
 from nba_betting.models.elo import expected_score
 from nba_betting.models.ensemble import ensemble_predict
 
@@ -139,6 +140,27 @@ def run_backtest(
         model = HistGradientBoostingClassifier(**wf_params)
         model.fit(X_tr, y_tr)
 
+        # Apply isotonic calibration on the last 20% of the training fold
+        # so that predict_proba on the test fold matches the calibrated
+        # probabilities used in the live predict pipeline.
+        calibrated_model = None
+        n_train = len(X_tr)
+        cal_start = int(n_train * 0.8)
+        X_fit, X_cal = X_tr[:cal_start], X_tr[cal_start:]
+        y_fit, y_cal = y_tr[:cal_start], y_tr[cal_start:]
+        if len(X_cal) >= 20:
+            try:
+                # Re-fit on the 80% slice so the calibrator sees out-of-sample
+                # predictions from the model trained on the same 80%.
+                fit_model = HistGradientBoostingClassifier(**wf_params)
+                fit_model.fit(X_fit, y_fit)
+                calibrated_model = calibrate_model(fit_model, X_cal, y_cal, method="isotonic")
+            except Exception:
+                calibrated_model = None
+
+        # Use calibrated model for test predictions; fall back to raw model.
+        predict_model = calibrated_model if calibrated_model is not None else model
+
         # Simulate betting on each test game
         test_indices = X_sorted.index[test_mask]
         for idx in test_indices:
@@ -146,7 +168,7 @@ def run_backtest(
             actual = y_sorted.loc[idx]
 
             feat_vals = row[feature_cols].values.reshape(1, -1)
-            gbm_prob = model.predict_proba(feat_vals)[0, 1]
+            gbm_prob = predict_model.predict_proba(feat_vals)[0, 1]
 
             # Get Elo probability from features
             elo_prob = row.get("elo_home_prob", 0.5)
@@ -289,12 +311,15 @@ def _compute_summary(bets: list[dict], initial_bankroll: float, bankroll_curve: 
     total_profit = sum(b["profit"] for b in bets)
     roi = total_profit / total_wagered if total_wagered > 0 else 0
 
-    # Sharpe ratio (annualized, assuming ~5 bets/day over ~200 days)
-    profits = [b["profit"] for b in bets]
-    if len(profits) > 1:
-        mean_profit = np.mean(profits)
-        std_profit = np.std(profits, ddof=1)
-        sharpe = (mean_profit / std_profit) * np.sqrt(len(profits)) if std_profit > 0 else 0
+    # Sharpe ratio: annualized using return-per-bet (ROI per bet), scaled
+    # by sqrt(n_bets_per_year). Using ~1000 as a rough NBA season bet count
+    # produces a stationary, bankroll-size-independent Sharpe estimate.
+    N_BETS_PER_YEAR = 1000
+    returns = [b["profit"] / b["bet_size"] for b in bets if b["bet_size"] > 0]
+    if len(returns) > 1:
+        mean_return = np.mean(returns)
+        std_return = np.std(returns, ddof=1)
+        sharpe = (mean_return / std_return) * np.sqrt(N_BETS_PER_YEAR) if std_return > 0 else 0
     else:
         sharpe = 0
 

@@ -124,8 +124,14 @@ def _pythagorean_expectation_vec(pts_for, pts_against):
     return out
 
 
-def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
+def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.Series]:
     """Build the complete feature matrix for all historical games.
+
+    Args:
+        recompute_elos: If True (default), clears and rebuilds all EloRating
+            rows from scratch via ``compute_all_elos()``. Set to False when
+            Elos were already computed in the same pipeline run to skip the
+            expensive recompute and use whatever rows are already in the DB.
 
     Returns:
         X: DataFrame of features (one row per game)
@@ -162,7 +168,8 @@ def build_feature_matrix() -> tuple[pd.DataFrame, pd.Series]:
     # Step 5: Compute Elo ratings and get per-game snapshots. Tier 1.3 —
     # load the off/def Elo columns too so we can build split-Elo features
     # in addition to the aggregate.
-    elo_ratings = compute_all_elos()
+    if recompute_elos:
+        compute_all_elos()
 
     session = get_session()
     try:

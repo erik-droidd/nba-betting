@@ -132,58 +132,53 @@ def simulate_bankroll(
     n_source = len(model_arr)
     n_bets = n_bets_per_sim or n_source
 
-    final_bankrolls = np.zeros(n_simulations)
-    max_drawdowns = np.zeros(n_simulations)
-    ruin_count = 0
+    # Vectorized simulation: pre-sample all indices (S × B), pre-compute
+    # Kelly fractions and decimal odds for the source pool, then loop over
+    # bets (n_bets ≈ 200) while operating on all simulations in parallel.
+    # Reduces ~12M Python iterations to ~200 NumPy array operations.
 
-    for sim in range(n_simulations):
-        bankroll = initial_bankroll
-        peak = bankroll
-        max_dd = 0.0
+    # Pre-sample bootstrap indices: shape (n_simulations, n_bets)
+    all_indices = rng.integers(0, n_source, size=(n_simulations, n_bets))
 
-        indices = rng.integers(0, n_source, size=n_bets)
+    # Pre-compute Kelly fractions for each source record (fraction of bankroll).
+    # kelly_fraction already caps at MAX_BET_PCT, so no second min() needed.
+    kelly_fracs = np.array(
+        [kelly_fraction(float(model_arr[j]), float(market_arr[j])) for j in range(n_source)],
+        dtype=float,
+    )
 
-        # Pre-draw Bernoulli flips for market_right mode; we only need
-        # len(indices) uniforms.
-        if mode == "market_right":
-            uniforms = rng.random(size=n_bets)
+    # Pre-compute decimal odds for each source record.
+    dec_odds = np.where(market_arr > 0, 1.0 / market_arr, 0.0)
 
-        for i, idx in enumerate(indices):
-            p_model = model_arr[idx]
-            p_market = market_arr[idx]
+    # Pre-generate all outcomes: shape (n_simulations, n_bets).
+    if mode == "empirical":
+        outcomes = won_arr[all_indices]  # boolean array, no random draws needed
+    else:  # market_right
+        outcomes = rng.random(size=(n_simulations, n_bets)) < market_arr[all_indices]
 
-            kelly_pct = kelly_fraction(p_model, p_market)
-            bet_size = min(bankroll * kelly_pct, bankroll * MAX_BET_PCT)
-            bet_size = max(0, bet_size)
+    # Path-dependent bankroll evolution: loop over bet steps, vectorize over sims.
+    # Once a simulation's bankroll reaches 0 it stays at 0 (bet_size = 0 × frac = 0).
+    bankrolls = np.full(n_simulations, float(initial_bankroll))
+    peaks = bankrolls.copy()
+    max_dds = np.zeros(n_simulations)
 
-            if bet_size <= 0:
-                continue
+    for t in range(n_bets):
+        idx_t = all_indices[:, t]           # (S,) source indices for this bet step
+        kf_t = kelly_fracs[idx_t]           # (S,) Kelly fractions
+        bet_sizes = bankrolls * kf_t        # (S,) zero when bankroll=0 or kf=0
+        won_t = outcomes[:, t]              # (S,) boolean outcomes
+        odds_t = dec_odds[idx_t]            # (S,) decimal odds
 
-            if mode == "empirical":
-                won = bool(won_arr[idx])
-            else:  # market_right
-                won = uniforms[i] < p_market
+        profit = np.where(won_t, bet_sizes * (odds_t - 1.0), -bet_sizes)
+        bankrolls = np.maximum(bankrolls + profit, 0.0)  # floor at 0 on ruin
 
-            decimal_odds = 1.0 / p_market if p_market > 0 else 0.0
+        peaks = np.maximum(peaks, bankrolls)
+        cur_dd = np.where(peaks > 0, (peaks - bankrolls) / peaks, 0.0)
+        max_dds = np.maximum(max_dds, cur_dd)
 
-            if won:
-                bankroll += bet_size * (decimal_odds - 1)
-            else:
-                bankroll -= bet_size
-
-            if bankroll > peak:
-                peak = bankroll
-            dd = (peak - bankroll) / peak if peak > 0 else 0
-            if dd > max_dd:
-                max_dd = dd
-
-            if bankroll <= 0:
-                ruin_count += 1
-                bankroll = 0
-                break
-
-        final_bankrolls[sim] = bankroll
-        max_drawdowns[sim] = max_dd
+    final_bankrolls = bankrolls
+    max_drawdowns = max_dds
+    ruin_count = int((final_bankrolls == 0).sum())
 
     profit_arr = final_bankrolls - initial_bankroll
     roi_arr = profit_arr / initial_bankroll

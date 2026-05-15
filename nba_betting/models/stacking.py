@@ -25,7 +25,7 @@ import joblib
 import numpy as np
 
 from nba_betting.config import MODELS_DIR
-from nba_betting.models.ensemble import _logit, _sigmoid
+from nba_betting.utils.math import logit as _logit, sigmoid as _sigmoid
 
 META_MODEL_PATH = MODELS_DIR / "ensemble_meta.joblib"
 
