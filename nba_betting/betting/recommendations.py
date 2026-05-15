@@ -326,21 +326,54 @@ def generate_recommendations(
     # Sort by edge descending
     recommendations.sort(key=lambda r: r.edge, reverse=True)
 
-    # Same-day correlation adjustment (#7 improvement): Kelly assumes
-    # independent bets, but NBA games on the same night share league-wide
-    # factors (ref crew assignments, national-TV pace effects, etc.).
-    # Empirical correlation from backtest residuals is ~0.15. When
-    # placing multiple bets on one slate, we scale each bet down by
-    # 1/sqrt(1 + (n-1)*rho) so total portfolio risk doesn't blow past
-    # what Kelly intended.
-    _SAME_DAY_RHO = 0.15  # estimated pairwise correlation
+    # Portfolio-level Kelly optimization: jointly maximize expected
+    # log-bankroll across the full slate using the SLSQP optimizer in
+    # portfolio.py.  This correctly handles same-day correlation and the
+    # total-exposure cap, replacing the ad-hoc 1/sqrt(1+(n-1)*rho) scaling.
+    from nba_betting.betting.portfolio import BetCandidate, optimize_slate, build_simple_correlation
+
     actionable = [r for r in recommendations if r.bet_side != "NO BET"]
-    n_bets = len(actionable)
-    if n_bets > 1:
-        import math
-        corr_scale = 1.0 / math.sqrt(1.0 + (n_bets - 1) * _SAME_DAY_RHO)
+    if len(actionable) > 1:
+        candidates = []
         for r in actionable:
-            r.kelly_pct = r.kelly_pct * corr_scale
-            r.bet_size = round(r.bet_size * corr_scale, 2)
+            if r.bet_side == "HOME":
+                prob = r.shrunken_home_prob if r.shrunken_home_prob is not None else r.model_home_prob
+                market_price = r.market_home_prob
+            else:  # AWAY
+                prob = (1.0 - r.shrunken_home_prob) if r.shrunken_home_prob is not None else (1.0 - r.model_home_prob)
+                market_price = 1.0 - r.market_home_prob
+
+            # Skip degenerate candidates (no market data or market_price at boundary).
+            if market_price <= 0 or market_price >= 1:
+                continue
+
+            candidates.append(BetCandidate(
+                id=f"{r.home_team}-{r.away_team}",
+                prob=prob,
+                market_price=market_price,
+                side=r.bet_side,
+            ))
+
+        if candidates:
+            corr = build_simple_correlation(candidates)
+            portfolio_result = optimize_slate(
+                candidates,
+                correlation=corr,
+                drawdown_mult=_dd_mult,
+            )
+            fractions = portfolio_result["fractions"]
+            # Map fractions back to the actionable recs that had valid candidates.
+            candidate_idx = 0
+            for rec in actionable:
+                if rec.bet_side == "HOME":
+                    mp = rec.market_home_prob
+                else:
+                    mp = 1.0 - rec.market_home_prob
+                if mp <= 0 or mp >= 1:
+                    # No valid candidate was created for this rec; leave Kelly as-is.
+                    continue
+                rec.kelly_pct = round(float(fractions[candidate_idx]), 6)
+                rec.bet_size = round(bankroll * float(fractions[candidate_idx]), 2)
+                candidate_idx += 1
 
     return recommendations

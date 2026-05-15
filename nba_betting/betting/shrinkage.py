@@ -34,17 +34,7 @@ prior is strong.
 """
 from __future__ import annotations
 
-import math
-
-
-def _logit(p: float) -> float:
-    """Numerically stable scalar logit. Clips to [1e-6, 1-1e-6]."""
-    p = max(1e-6, min(1.0 - 1e-6, p))
-    return math.log(p / (1.0 - p))
-
-
-def _sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
+from nba_betting.utils.math import logit_scalar as _logit, sigmoid_scalar as _sigmoid
 
 
 def shrink_to_market(

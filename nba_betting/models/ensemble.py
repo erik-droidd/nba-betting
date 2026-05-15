@@ -28,15 +28,7 @@ ENSEMBLE_WEIGHT_PATH = MODELS_DIR / "ensemble_weight.joblib"
 DEFAULT_ELO_WEIGHT = 0.3
 
 
-def _logit(p):
-    """Numerically stable logit. Accepts scalars or numpy arrays."""
-    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
-    return np.log(p / (1.0 - p))
-
-
-def _sigmoid(x):
-    """Inverse of _logit."""
-    return 1.0 / (1.0 + np.exp(-x))
+from nba_betting.utils.math import logit as _logit, sigmoid as _sigmoid
 
 
 def ensemble_predict(

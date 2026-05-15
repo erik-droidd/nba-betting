@@ -130,9 +130,9 @@ def update_off_def_elo(
     # they shifted aggregate Elo. The multiplier already includes Tier 1.4
     # opp-strength dampening.
     if home_score > away_score:
-        mult = mov_multiplier(abs(home_score - away_score), home_off + home_def, away_off + away_def)
+        mult = mov_multiplier(abs(home_score - away_score), (home_off + home_def) / 2, (away_off + away_def) / 2)
     else:
-        mult = mov_multiplier(abs(home_score - away_score), away_off + away_def, home_off + home_def)
+        mult = mov_multiplier(abs(home_score - away_score), (away_off + away_def) / 2, (home_off + home_def) / 2)
 
     # Half the K-factor on each component because every game now updates
     # two ratings (off and def) per team — keeps total movement ~equal to

@@ -49,17 +49,50 @@ def train_model(
     y: pd.Series,
     params: dict = None,
 ) -> HistGradientBoostingClassifier:
-    """Train a gradient boosting model on the full provided dataset."""
+    """Train a gradient boosting model on the full provided dataset.
+
+    When ``_date`` is present in ``X``, uses a two-stage temporal approach to
+    find the optimal number of iterations without leaking future games into the
+    early-stopping validation set:
+
+    1. Sort chronologically and fit a temporary model on the first 85% with
+       early stopping enabled — this finds ``optimal_n_iter``.
+    2. Retrain a fresh model on the full dataset with ``early_stopping=False``
+       and ``max_iter=optimal_n_iter``.
+
+    When ``_date`` is absent, falls back to the standard sklearn behaviour
+    (random ``validation_fraction`` internal split).
+    """
     if params is None:
         params = DEFAULT_PARAMS.copy()
 
     feature_cols = _get_feature_cols(X)
-    # Fit on DataFrame so feature names are preserved (consistent with prediction)
-    X_train = X[feature_cols]
 
+    if "_date" in X.columns and params.get("early_stopping", False):
+        dates = pd.to_datetime(X["_date"])
+        sorted_idx = np.argsort(dates.values)
+        val_frac = params.get("validation_fraction", 0.15)
+        n = len(sorted_idx)
+        train_n = max(1, int(n * (1.0 - val_frac)))
+
+        train_pos = sorted_idx[:train_n]
+        X_tr = X.iloc[train_pos][feature_cols]
+        y_tr = y.iloc[train_pos].values
+
+        # Stage 1: find optimal n_iter on the temporal training subset.
+        tmp = HistGradientBoostingClassifier(**params)
+        tmp.fit(X_tr, y_tr)
+        optimal_n_iter = int(tmp.n_iter_)
+
+        # Stage 2: retrain on full dataset with the found iteration count.
+        final_params = {**params, "early_stopping": False, "max_iter": optimal_n_iter}
+        model = HistGradientBoostingClassifier(**final_params)
+        model.fit(X[feature_cols], y.values)
+        return model
+
+    # No temporal info — fall back to standard training with internal random split.
     model = HistGradientBoostingClassifier(**params)
-    model.fit(X_train, y.values)
-
+    model.fit(X[feature_cols], y.values)
     return model
 
 

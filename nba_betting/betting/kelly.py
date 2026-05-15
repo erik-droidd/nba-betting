@@ -121,7 +121,7 @@ def kelly_fraction(
         return 0.0
 
     # Tier 2.5 — scale lambda by signal strength when we have the inputs.
-    edge = prob - market_price
+    edge = prob * (1.0 / market_price) - 1.0
     effective_lambda = signal_dependent_lambda(
         lambda_,
         edge=edge,
