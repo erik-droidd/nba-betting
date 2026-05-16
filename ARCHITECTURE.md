@@ -150,11 +150,15 @@ nba_betting/
 │   ├── player_impact.py        — ESPN-driven player features (starter out,
 │   │                              missing minutes %, available-talent diff).
 │   └── builder.py              — THE assembler. Two entry points:
-│                                   build_feature_matrix() for training,
+│                                   build_feature_matrix(recompute_elos=True)
+│                                   for training (flag skips Elo rebuild when
+│                                   already done upstream),
 │                                   build_prediction_features() for one game.
 │                                 Both must produce the SAME columns in the
 │                                 SAME order or prediction-time imputation
 │                                 will silently feed garbage to the model.
+│                                 Four Factors rolling uses groupby.transform
+│                                 (vectorized, ~2× faster than per-team loop).
 │
 ├── models/
 │   ├── elo.py                  — 538-style Elo with home advantage,
@@ -189,18 +193,26 @@ nba_betting/
 │                                 blend with a grid-searched weight
 │                                 persisted to ensemble_weight.joblib.
 │
+├── utils/
+│   └── math.py                 — Shared logit/sigmoid (array + scalar).
+│                                 Single source of truth imported by
+│                                 ensemble.py, shrinkage.py, stacking.py.
+│
 ├── betting/
 │   ├── edge.py                 — compute_edge, is_positive_ev, and
 │   │                              confidence_badge (STRONG/MODERATE/LEAN/
 │   │                              SUSPECT thresholds).
 │   ├── kelly.py                — kelly_fraction + compute_bet_size.
 │   │                              signal_dependent_lambda() scales the
-│   │                              Kelly fraction by edge/CLV/disagreement
+│   │                              Kelly fraction by multiplicative edge
+│   │                              (prob/market - 1), CLV, and disagreement
 │   │                              factors (clamped 0.25×–1.25× base).
 │   ├── portfolio.py            — optimize_slate(): slate-level Kelly via
 │   │                              scipy SLSQP with a Gaussian copula
-│   │                              correlation model. Falls back to
-│   │                              haircut per-bet Kelly for 1 bet.
+│   │                              correlation model. Wired into
+│   │                              recommendations.generate_recommendations.
+│   │                              Falls back to haircut per-bet Kelly for
+│   │                              1 bet or optimizer failure.
 │   │                              build_simple_correlation() provides
 │   │                              the default same-day +0.05 ρ matrix.
 │   ├── shrinkage.py            — shrink_to_market (Bayesian log-odds
@@ -557,24 +569,16 @@ Kelly fraction is scaled by three factors derived from the current bet signal:
 
 The composite is clamped to `[0.25×, 1.25×]` of the base `KELLY_FRACTION`.
 
-**Same-day correlation haircut** (currently the production sizing path):
-the live `predict` flow in `betting/recommendations.py` sizes each bet
-independently with `kelly_fraction()`, then scales the whole slate by
-`1 / sqrt(1 + (n − 1)·ρ)` with `ρ = 0.15`. This is a closed-form
-variance-adjusted shrinkage that approximates joint sizing without an
-optimizer in the hot path.
-
-**Slate-level portfolio Kelly** (`optimize_slate()`, available but not
-currently wired into `recommendations.generate_recommendations`): a
-`scipy.optimize.minimize(SLSQP)` solver maximises
-`E[log(1 + Σ fᵢ·rᵢ)]` (approximated via Gaussian copula Monte Carlo) in
-full-Kelly space, then post-shrinks by `kelly_lambda · drawdown_mult`
-and enforces `0 ≤ fᵢ ≤ MAX_BET_PCT` and `Σ fᵢ ≤ MAX_EXPOSURE_PCT`.
-`build_simple_correlation()` provides the default correlation matrix
-(same-day off-diagonal ρ = 0.05). Falls back to haircut per-bet Kelly
-when the solver fails. Switching `recommendations.py` from the
-sqrt-haircut to `optimize_slate()` is a one-call swap when richer
-correlation data justifies it.
+**Slate-level portfolio Kelly** (`optimize_slate()` in `betting/portfolio.py`,
+wired into `recommendations.generate_recommendations`): when N > 1
+positive-EV bets are present, a `scipy.optimize.minimize(SLSQP)` solver
+maximises `E[log(1 + Σ fᵢ·rᵢ)]` (approximated via Gaussian copula Monte
+Carlo with 2,000 samples) in full-Kelly space, then post-shrinks by
+`kelly_lambda · drawdown_mult` and enforces `0 ≤ fᵢ ≤ MAX_BET_PCT` and
+`Σ fᵢ ≤ MAX_EXPOSURE_PCT`. `build_simple_correlation()` provides the
+default correlation matrix (same-day off-diagonal ρ = 0.05). Falls back
+to proportional per-bet Kelly haircut when the solver fails. For a single
+actionable bet the portfolio call is skipped — per-bet Kelly is exact.
 
 **Closing Line Value (CLV)** is tracked per bet: `bet_market_prob_at_pick`
 is stored by `record_predictions()`, and `update_closing_lines()` fills
@@ -872,13 +876,21 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (45 tests across three files).
+# 7. Full test suite (89 tests across seven files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 45 passed in < 5s.
-# test_new_features.py    — 16 tests (shrinkage, drivers, spreads, migration)
-# test_improvements.py    — 15 tests (rolling stats, Four Factors, Elo)
-# test_tier_improvements.py — 14 tests (off/def Elo, EWM, meta-learner,
+# Expect: 89 passed in < 5s.
+# test_new_features.py       — 16 tests (shrinkage, drivers, spreads, migration)
+# test_improvements.py       — 15 tests (rolling stats, Four Factors, Elo,
+#   portfolio optimizer exposure cap)
+# test_tier_improvements.py  — 14 tests (off/def Elo, EWM, meta-learner,
 #   signal-dependent Kelly, portfolio Kelly, dedup, fuzzy matching, cache)
+# test_montecarlo.py         — 12 tests (empirical bootstrap, market-null,
+#   log-growth invariance, reproducibility, validation)
+# test_simulate_horizon.py   —  8 tests (data-driven horizon, density scaling)
+# test_snapshot_jsonl.py     — 14 tests (JSONL round-trip, idempotence,
+#   ESPN fallback, Polymarket date disambiguation)
+# test_playoff_sync_and_resolve.py — 10 tests (play-in/playoff sync,
+#   update_results matching, record_predictions ET-date filing)
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -1088,10 +1100,9 @@ Three tiers of improvements shipped after the hardening pass:
 - **CLV tracking** — `bet_market_prob_at_pick` stored per prediction;
   `update_closing_lines()` computes `clv_logit` post-game. `clv` CLI
   command and `performance` table both surface CLV t-stat.
-- **Slate-level portfolio Kelly** (available, not currently wired) —
-  joint SLSQP optimization with Gaussian copula correlation for
-  correlated same-day bets. Production currently uses a closed-form
-  sqrt-haircut on per-bet Kelly (see §5.5).
+- **Slate-level portfolio Kelly** — joint SLSQP optimization with Gaussian
+  copula correlation for correlated same-day bets, wired into
+  `recommendations.generate_recommendations` (see §5.5).
 - **Signal-dependent Kelly fraction** — edge/CLV/disagreement scaling
   of the base Kelly multiplier, clamped to `[0.25×, 1.25×]` (see §5.5).
 
@@ -1109,6 +1120,82 @@ Three tiers of improvements shipped after the hardening pass:
   prices moved < 0.5% within a 4h window; safe to run on tight crons.
 - **Polymarket fuzzy fallback** — `_name_to_abbr()` tries exact match
   then falls back to ordered substring containment for non-standard titles.
+
+### 10.1c Code-review hardening pass (2026-05)
+
+A full audit of the system's logic, calibration alignment, and hot paths:
+
+**Bugs fixed:**
+
+- **Off/def Elo scale** (`models/elo.py`) — `update_off_def_elo` was
+  passing `home_off + home_def` (~3000) to `mov_multiplier` which
+  expects aggregate Elo (~1500). The `opp_strength_factor` sigmoid uses
+  a 200-point scale, so the summed value doubled the dampening. Fixed
+  to pass `(off + def) / 2`.
+- **Kelly edge formula** (`betting/kelly.py`) — `signal_dependent_lambda`
+  received `prob - market_price` (probability difference) but its
+  thresholds (`< 0.02`, `<= 0.08`, `<= 0.12`, `<= 0.20`) are calibrated
+  for multiplicative edge (`prob / market_price - 1`). For a 60%/50%
+  game the two values are 0.10 and 0.20 respectively — a 2× discrepancy
+  that caused high-edge bets to be under-penalized. Fixed to compute
+  `edge = prob * (1.0 / market_price) - 1.0`.
+- **Backtest calibration** (`betting/backtest.py`) — `run_backtest` trained
+  a raw `HistGradientBoostingClassifier` per fold and used its uncalibrated
+  probabilities for edge/Kelly. The live predict path uses the isotonic
+  calibrated model. Each backtest fold now holds out its last 20% of
+  training data, re-fits on the 80%, applies isotonic calibration, and
+  uses the calibrated model for test predictions — matching the live
+  pipeline. Falls back to uncalibrated on small folds (< 20 samples).
+- **Sharpe ratio** (`betting/backtest.py`) — the old formula
+  `(mean_profit / std_profit) * sqrt(n)` is the t-statistic for "mean
+  P&L ≠ 0", not Sharpe — it scaled with bankroll size and grew with
+  bet count. Replaced with return-based Sharpe: `mean(profit/bet_size) /
+  std(profit/bet_size) * sqrt(1000)` (1000 ≈ NBA season bet count),
+  making it stationary and bankroll-size-independent.
+
+**Portfolio optimizer wired:**
+
+- `betting/recommendations.py` — the ad-hoc `1/sqrt(1 + (n-1)·ρ)`
+  correlation haircut is replaced by `optimize_slate()` (see §5.5).
+  `portfolio.py` was fully implemented but never imported until this pass.
+
+**New shared utilities:**
+
+- `nba_betting/utils/math.py` — single source of truth for `logit`,
+  `sigmoid`, `logit_scalar`, `sigmoid_scalar`. Previously each of
+  `ensemble.py`, `shrinkage.py`, and `stacking.py` defined its own copy;
+  all now import from here.
+
+**Efficiency improvements:**
+
+- **Vectorized `simulate_bankroll`** (`betting/montecarlo.py`) — the
+  `for sim in range(n_simulations): for bet in ...` double loop (~12M
+  Python iterations at 60k sims × 200 bets) replaced with a NumPy
+  batch approach: pre-sample all indices as `(S, B)`, pre-compute Kelly
+  fractions and decimal odds for the source pool, pre-generate all
+  outcomes, then loop over bet steps only (~200 iterations) with NumPy
+  array ops across all simulations simultaneously. 60k × 200 bets: ~0.16s.
+- **Temporal early stopping** (`models/xgboost_model.py`) — `train_model`
+  previously used `validation_fraction=0.15` (random internal split),
+  which could pull future-season games into the early-stopping holdout.
+  When `_date` is present in `X`, it now sorts chronologically, fits a
+  temporary model on the first 85% to find `optimal_n_iter`, then
+  retrains on the full dataset with `early_stopping=False, max_iter=optimal_n_iter`.
+  Falls back to the existing random-split behavior when `_date` is absent.
+- **Four Factors rolling** (`features/builder.py`) — the nested
+  `for team_id in groupby: for col: for window: rolling_df.loc[idx] = ...`
+  loop replaced with `groupby().transform()` which uses pandas' internal
+  C path throughout. ~2× faster on a full 3-season history.
+- **`compute_prediction_drivers` matrix** (`models/drivers.py`) — the
+  neutralized feature matrix was built via `pd.concat([row]*N)` (N full
+  DataFrame copies) + `iloc` cell patching. Now uses `np.tile(row_vals,
+  (N, 1))` + `np.fill_diagonal` — pre-fills every row with baseline
+  values and sets the diagonal to neutral means in one operation. ~2×
+  faster at 150 features (14ms → 7ms per attribution call).
+- **`build_feature_matrix(recompute_elos=True)`** (`features/builder.py`) —
+  new flag lets callers that already computed Elos (e.g. the train
+  pipeline before the first `build_feature_matrix` call) skip the
+  expensive DB wipe-and-rebuild. Default `True` preserves existing behavior.
 
 ### 10.2 Remaining caveats
 

@@ -88,7 +88,7 @@ This is the main command. It will:
 8. **Bayesian-shrink** the injury-adjusted model probability toward the market log-odds (λ = 0.6 by default — market-leaning). This is the single biggest change to how the system filters bets: small model-vs-market disagreements get pulled back to the market, and only decisive conviction survives.
 9. Compute edge against the **shrunken** probability (not the raw model) — so model%, market%, and edge% reconcile exactly in the UI
 10. Apply the **asymmetric bet-side floor** (`MIN_BET_SIDE_PROB = 0.30`): the system refuses to bet a team the model itself only gives a <30% chance of winning, even if the edge math looks positive. This kills "lottery-ticket" bets where positive EV depends on a tail price the model isn't really contradicting.
-11. Size bets using **signal-dependent quarter-Kelly** (fraction scales with edge magnitude) and **slate-level portfolio Kelly** (accounts for correlated same-day bets via Gaussian copula; falls back to per-bet Kelly when only 1 bet)
+11. Size bets using **signal-dependent quarter-Kelly** (fraction scales with edge magnitude) and **slate-level portfolio Kelly**: when multiple positive-EV bets exist, `optimize_slate()` runs a SLSQP joint optimization with a Gaussian copula correlation matrix to maximize expected log-bankroll across the full slate, enforcing per-bet (5%) and total-exposure (25%) caps; falls back to proportional per-bet Kelly when the optimizer fails or only one bet qualifies
 12. Display recommendations with explanations (the explanation prefers feature signals that *agree* with the bet; if every surface stat contradicts the bet, it says so honestly rather than parroting misleading reasoning)
 
 **Output columns**:
@@ -296,7 +296,7 @@ python3 -m nba_betting backtest
 python3 -m nba_betting backtest --bankroll 5000 --splits 3
 ```
 
-Reports: win rate, ROI, Sharpe ratio, max drawdown, and per-signal breakdown.
+Reports: win rate, ROI, Sharpe ratio (annualized return-based, normalized to ~1000 bets/year), max drawdown, and per-signal breakdown.
 
 **Backtest modes** — four combinations control whether real market odds and live shrinkage are applied:
 
@@ -327,7 +327,8 @@ python3 -m nba_betting simulate --real-odds --n-sims 50000
 ```
 
 Runs 10,000 (default) simulated seasons by **bootstrapping from the
-backtest's actual resolved bets**. Each simulated bet draws a real
+backtest's actual resolved bets**. The inner simulation loop is fully
+vectorized — 60,000 simulations × 200 bets completes in ~0.2 seconds. Each simulated bet draws a real
 historical `(p_model, p_market, won)` tuple with replacement — the
 realized win flag is used directly, so the realized win rate is
 preserved. Two modes are reported side-by-side:
@@ -406,10 +407,14 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-45 fast unit tests across three test files:
+89 fast unit tests across five test files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
-- **`test_improvements.py`** (15): rolling stats, Four Factors, Elo accuracy.
+- **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
+- **`test_montecarlo.py`** (12): empirical bootstrap correctness, market-null behaviour, horizon-invariant log-growth metrics, reproducibility, input validation.
+- **`test_simulate_horizon.py`** (8): data-driven horizon projection, density scaling, edge-case fallbacks.
+- **`test_snapshot_jsonl.py`** (14): JSONL round-trip, idempotence, bad-row tolerance, ESPN fallback, Polymarket date disambiguation.
+- **`test_playoff_sync_and_resolve.py`** (10): play-in/playoff game union, `update_results` date matching, `record_predictions` ET-date filing.
 
 Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
 
@@ -482,7 +487,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (45 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (89 tests) |
 
 ---
 
