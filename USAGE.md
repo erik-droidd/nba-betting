@@ -38,16 +38,16 @@ python3 -m nba_betting train
 ```
 
 This will:
-- Build a feature matrix (~92 features: rolling stats, Four Factors, **SOS-adjusted net rating**, **pace/possessions**, **EWM-weighted stats**, **off/def Elo split**, Pythagorean expectation, rest days, Elo)
-- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries — **with per-fold hyperparameter grid search** (max_depth, learning_rate, max_iter, regularization); best params saved to `trained_models/best_params.joblib`
-- Report accuracy, Brier score, and log loss per fold
+- Build a feature matrix (~98 features: rolling stats, Four Factors, **SOS-adjusted net rating**, **pace/possessions**, **EWM-weighted stats**, **off/def Elo split**, Pythagorean expectation, rest days, Elo, **player availability** (WAT score, missing-minutes %, star-out flag), injury impact, line movement)
+- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries — **with per-fold hyperparameter grid search** (max_depth, learning_rate, max_iter, regularization); best params saved to `trained_models/best_params.joblib`. Uses a two-stage **temporal early-stopping split**: fit a temporary model on the first 85% of training data to find the optimal iteration count, then retrain on all data with that fixed count (avoids leaking future games into the early-stopping validation set)
+- Report accuracy, Brier score, log loss, and calibrated ECE per fold
 - Train the final model on all data
 - **Calibrate probabilities via isotonic regression** (replaces Platt sigmoid, which over-compressed tails on the ~54% home-win base rate)
 - **Grid-search the optimal Elo-vs-GBM ensemble weight** by minimizing log-loss on the calibration fold — the learned weight is saved to `trained_models/ensemble_weight.joblib` and reloaded automatically at prediction time
-- When sufficient out-of-fold data is available, fit a **stacked logistic meta-learner** on [elo_logit, gbm_logit, |disagreement|] and save it to `trained_models/ensemble_meta.joblib`; falls back to the log-odds blend otherwise
+- **Fit a stacked logistic meta-learner** on the walk-forward out-of-fold predictions [elo_logit, gbm_logit, |disagreement|] and save it to `trained_models/ensemble_meta.joblib` (requires ≥ 200 OOF games; falls back to the log-odds blend otherwise). The meta-learner learns game-dependent Elo/GBM weights instead of the static grid-searched scalar.
 - Save all model artifacts to `trained_models/`
 
-**Expected output**: ~63-65% walk-forward accuracy, Brier score ~0.223, calibrated ECE ~0.00-0.02.
+**Expected output**: ~62-65% walk-forward accuracy, Brier score ~0.22-0.24, calibrated ECE ~0.00-0.02.
 
 ### 4. Sync Player Rosters (Optional, Improves Predictions)
 

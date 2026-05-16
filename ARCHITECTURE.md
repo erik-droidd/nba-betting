@@ -147,8 +147,15 @@ nba_betting/
 │   │                              opp_dreb now vectorized via groupby
 │   │                              transform (no per-row apply).
 │   ├── rest_days.py            — rest_days, is_b2b, games_last_7/14.
-│   ├── player_impact.py        — ESPN-driven player features (starter out,
-│   │                              missing minutes %, available-talent diff).
+│   ├── player_impact.py        — ESPN-driven player features: WAT score,
+│   │                              missing_minutes_pct, star_out flag.
+│   │                              compute_player_impact_features() is called
+│   │                              at predict time (cli.py + api/routes.py)
+│   │                              and injects live values into extra_features.
+│   │                              Training uses 0.0 for all historical rows
+│   │                              (same forward-accumulating convention as
+│   │                              injury_impact); the model learns the signal
+│   │                              once live data accumulates.
 │   └── builder.py              — THE assembler. Two entry points:
 │                                   build_feature_matrix(recompute_elos=True)
 │                                   for training (flag skips Elo rebuild when
@@ -452,6 +459,31 @@ The final model-feature list is assembled in `builder.py::build_feature_matrix()
 step 8 as `model_features` and is stored to `feature_cols.joblib` by the
 training path so inference can round-trip it.
 
+### 4.10 Player impact features
+
+`features/player_impact.py::compute_player_impact_features()` produces 6
+features from the current ESPN injury list + `PlayerStat` roster:
+
+- `home_missing_minutes_pct` / `away_missing_minutes_pct`: fraction of
+  each team's typical minutes unavailable due to injury/rest.
+- `home_star_out` / `away_star_out`: 1.0 if any player averaging ≥ 30 mpg
+  is at least 50% likely to miss (Out/Doubtful).
+- `diff_missing_minutes_pct`: home minus away missing-minutes fraction.
+- `diff_available_talent`: home minus away Weighted Available Talent
+  (WAT = Σ (pts + ast + reb) × P(available) per player).
+
+**Training**: all 6 features are set to 0.0 for every historical game
+(no per-game player availability archive exists). The model learns to
+treat 0 as "unknown, average" — the same forward-accumulating convention
+as `injury_impact_out`. Signal accumulates as live predictions write real
+values and the model is retrained.
+
+**Prediction time**: `cli.py::_xgb_predict` and `api/routes.py::_predict`
+call `compute_player_impact_features()` and inject the results into
+`extra_features` before `build_prediction_features()`. The `injuries`
+list is captured from the outer closure scope and already includes
+ESPN sync + lineup bump adjustments.
+
 ### 4.6 Imputation strategy
 
 - `build_feature_matrix()` drops rows where >30% of features are NaN
@@ -498,13 +530,21 @@ vectorized; for the live prediction it's called directly per-team.
   the filename/artifact is historical; we swapped for hist-GBM because
   it handles NaN natively and trains faster on this scale.
 - Walk-forward validation with July 1 season boundaries
-  (`walk_forward_validate()`).
+  (`walk_forward_validate(n_splits, return_oof)`). When `return_oof=True`
+  (used by the `train` CLI), per-fold OOF arrays
+  (`oof_elo_probs`, `oof_gbm_cal_probs`, `oof_y_true`) are returned for
+  meta-learner fitting.
 - **Per-fold hyperparameter grid search** (`search_hyperparams()`): each
   WF fold runs an 8-combo grid over `max_depth ∈ {4,5}`,
   `learning_rate ∈ {0.03,0.05}`, `max_iter ∈ {300,500}`, and
   `l2_regularization ∈ {0,0.1}`, picking the combo with best held-out
   log-loss on a 15% calibration slice. Best params saved to
   `trained_models/best_params.joblib` and reloaded for final training.
+- **Temporal early-stopping split** (`train_model()`): when `_date` is
+  present in X, uses a two-stage approach — fit a temporary model on the
+  first 85% chronologically to find `n_iter_`, then retrain on all data
+  with `early_stopping=False, max_iter=n_iter_`. Avoids pulling future
+  games into the early-stopping validation set.
 - **Mtime-keyed in-process cache**: `load_model()` and `load_feature_means()`
   skip disk reads if the artifact hasn't changed since last load — saves
   ~50ms per repeated API call.
@@ -528,12 +568,14 @@ Uses `CalibratedClassifierCV(cv="prefit")` wrapped in `FrozenEstimator`
 ### 5.4 Ensemble (`models/ensemble.py` + `models/stacking.py`)
 
 **Primary path — stacked meta-learner** (`models/stacking.py`):
-When `trained_models/ensemble_meta.joblib` exists, `blend_predictions()`
-uses a logistic regression meta-learner trained on out-of-fold
-`[logit(p_elo), logit(p_gbm), |logit(p_elo) - logit(p_gbm)|]`. It learns
-per-region weights automatically — e.g., trusting Elo more when models
-strongly agree, GBM more in mid-range uncertainty. Falls back gracefully
-to the log-odds blend when the artifact is absent.
+The `train` CLI command fits a logistic regression meta-learner on the
+walk-forward out-of-fold predictions (`return_oof=True`) and saves it
+to `trained_models/ensemble_meta.joblib` when ≥ 200 OOF games are
+available. `blend_predictions()` automatically uses it at prediction
+time. Features: `[logit(p_elo), logit(p_gbm), |logit(p_elo) - logit(p_gbm)|]`.
+Learns per-region weights — e.g., trusting Elo more when both models
+agree, GBM more in mid-range uncertainty. Falls back gracefully to the
+log-odds blend when the artifact is absent (fresh install, < 200 OOF games).
 
 **Fallback — log-odds (logit-space) blending**:
 
