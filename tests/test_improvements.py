@@ -271,47 +271,35 @@ def test_walk_forward_includes_calibration_keys():
 
 
 def test_correlation_adjustment_scales_multiple_bets():
-    """With N > 1 actionable bets, bet sizes should be scaled down."""
-    from nba_betting.betting.recommendations import BetRecommendation
+    """Portfolio optimizer keeps total exposure within the configured cap
+    and assigns non-negative fractions to positive-EV bets."""
+    from nba_betting.betting.portfolio import (
+        BetCandidate, optimize_slate, build_simple_correlation,
+    )
+    from nba_betting.config import MAX_EXPOSURE_PCT
 
-    # Create 4 "actionable" recs
-    recs = []
-    for i in range(4):
-        recs.append(BetRecommendation(
-            home_team="LAL", away_team="BOS",
-            model_home_prob=0.55, market_home_prob=0.50,
-            bet_side="HOME", edge=0.10, ev_per_dollar=0.10,
-            kelly_pct=0.03, bet_size=30.0, badge="MODERATE",
-        ))
-    # Add a NO BET rec to verify it's untouched
-    recs.append(BetRecommendation(
-        home_team="MIA", away_team="NYK",
-        model_home_prob=0.50, market_home_prob=0.50,
-        bet_side="NO BET", edge=0.0, ev_per_dollar=0.0,
-        kelly_pct=0.0, bet_size=0.0, badge="NO BET",
-    ))
+    # Four positive-EV bets; uncapped per-game Kelly would exceed MAX_EXPOSURE_PCT.
+    candidates = [
+        BetCandidate(id=f"game-{i}", prob=0.58, market_price=0.48, side="HOME")
+        for i in range(4)
+    ]
+    corr = build_simple_correlation(candidates)
+    result = optimize_slate(candidates, correlation=corr)
+    fractions = result["fractions"]
 
-    # Simulate the correlation adjustment
-    import math
-    _SAME_DAY_RHO = 0.15
-    actionable = [r for r in recs if r.bet_side != "NO BET"]
-    n_bets = len(actionable)
-    corr_scale = 1.0 / math.sqrt(1.0 + (n_bets - 1) * _SAME_DAY_RHO)
+    # Total exposure must not exceed the configured cap.
+    assert fractions.sum() <= MAX_EXPOSURE_PCT + 1e-9
 
-    for r in actionable:
-        r.kelly_pct *= corr_scale
-        r.bet_size = round(r.bet_size * corr_scale, 2)
+    # Every fraction is non-negative.
+    assert (fractions >= 0).all()
 
-    # Verify scaling happened
-    assert corr_scale < 1.0
-    assert actionable[0].bet_size < 30.0
-    # NO BET should be untouched
-    no_bet = next(r for r in recs if r.bet_side == "NO BET")
-    assert no_bet.bet_size == 0.0
+    # At least one fraction is positive (all bets have genuine edge).
+    assert fractions.sum() > 0
 
-    # Verify the formula: 4 bets, rho=0.15 → scale = 1/sqrt(1 + 3*0.15) = 1/sqrt(1.45)
-    expected_scale = 1.0 / math.sqrt(1.45)
-    assert corr_scale == pytest.approx(expected_scale, abs=1e-9)
+    # A negative-EV candidate receives fraction = 0.
+    neg = [BetCandidate(id="neg", prob=0.42, market_price=0.50, side="HOME")]
+    neg_result = optimize_slate(neg)
+    assert neg_result["fractions"].sum() == 0.0
 
 
 # ---------------------------------------------------------------------------
