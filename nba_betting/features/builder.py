@@ -453,17 +453,25 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     # weight the non-zero rows accordingly.
     _attach_line_movement_features(game_features)
 
+    # Defragment game_features before the final column additions. Building
+    # the full feature set adds hundreds of columns in small batches, which
+    # fragments the underlying NumPy buffers. A single .copy() consolidates
+    # them so that subsequent column assignments don't trigger PerformanceWarning.
+    game_features = game_features.copy()
+
     # Step 7d: Player impact features (WAT score, missing-minutes %,
     # star-out flag). Historical games get 0.0 — no per-game player
     # availability archive exists for the training set. Live predictions
     # inject actual values via compute_player_impact_features at predict
     # time. Same forward-accumulating convention as injury_impact.
-    for col in (
-        "home_missing_minutes_pct", "away_missing_minutes_pct",
-        "home_star_out", "away_star_out",
-        "diff_missing_minutes_pct", "diff_available_talent",
-    ):
-        game_features[col] = 0.0
+    game_features = game_features.assign(
+        home_missing_minutes_pct=0.0,
+        away_missing_minutes_pct=0.0,
+        home_star_out=0.0,
+        away_star_out=0.0,
+        diff_missing_minutes_pct=0.0,
+        diff_available_talent=0.0,
+    )
 
     # Step 8: Select final feature columns
     model_features = (
@@ -548,20 +556,23 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     # Compute feature means BEFORE filling NaN (for use in prediction imputation)
     feature_means = X.mean().to_dict()
 
-    # Fill remaining NaN with feature means (consistent with prediction imputation)
-    X = X.fillna(X.mean()).fillna(0)
+    # Fill remaining NaN with feature means (consistent with prediction imputation).
+    # A second .copy() consolidates the buffers so that the metadata assign below
+    # doesn't trigger a PerformanceWarning.
+    X = X.fillna(X.mean()).fillna(0).copy()
 
     # Attach metadata for walk-forward splitting and for joining historical
     # odds snapshots back to games during real-odds backtests.
-    X["_game_id"] = game_ids.values
-    X["_date"] = dates.values
-    X["_home_team_id"] = home_team_ids.values
-    X["_away_team_id"] = away_team_ids.values
-    # Raw scores for spreads/totals regression. Kept in metadata columns
-    # (underscore-prefixed) so they never leak into the classification
-    # model's feature set.
-    X["_home_score"] = home_scores.values
-    X["_away_score"] = away_scores.values
+    X = X.assign(
+        _game_id=game_ids.values,
+        _date=dates.values,
+        _home_team_id=home_team_ids.values,
+        _away_team_id=away_team_ids.values,
+        # Raw scores for spreads/totals regression. Underscore prefix keeps
+        # them out of the classification feature set.
+        _home_score=home_scores.values,
+        _away_score=away_scores.values,
+    )
 
     # Attach feature means as attribute for saving with the model
     X.attrs["feature_means"] = feature_means
