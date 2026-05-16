@@ -116,6 +116,19 @@ def get_predictions(bankroll: float = Query(1000.0)):
                     extra["prob_movement"] = lm.get("prob_movement", 0.0)
                     extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
 
+                    # Player impact features (injuries is set in outer scope).
+                    try:
+                        from nba_betting.features.player_impact import (
+                            compute_player_impact_features,
+                        )
+                        extra.update(compute_player_impact_features(
+                            home_id, away_id, injuries,
+                            home_abbr=_game["home_team_abbr"],
+                            away_abbr=_game["away_team_abbr"],
+                        ))
+                    except Exception:
+                        pass
+
             # Tier 1.3 — inject split off/def Elo when available.
             h_off_def = off_def_elos.get(home_id) if home_id else None
             a_off_def = off_def_elos.get(away_id) if away_id else None

@@ -87,20 +87,18 @@ def predict(
             rolling_df = add_opponent_rebound_data(rolling_df)
             rolling_df = add_rest_features(rolling_df)
 
-            # Add rolling Four Factors
+            # Add rolling Four Factors (vectorized — matches builder.py training path)
             import pandas as pd
             rolling_df = rolling_df.sort_values(["team_id", "date", "game_id"])
             four_factor_cols = ["efg_pct", "tov_pct", "orb_pct", "ft_rate"]
-            for team_id, team_df in rolling_df.groupby("team_id"):
-                idx = team_df.index
-                for col in four_factor_cols:
-                    for w in (5, 10, 20):
-                        roll_col = f"{col}_roll_{w}"
-                        rolling_df.loc[idx, roll_col] = (
-                            team_df[col].shift(1)
-                            .rolling(window=w, min_periods=max(1, w // 2))
-                            .mean().values
-                        )
+            for col in four_factor_cols:
+                shifted = rolling_df.groupby("team_id", sort=False)[col].shift(1)
+                for w in (5, 10, 20):
+                    mp = max(1, w // 2)
+                    rolling_df[f"{col}_roll_{w}"] = (
+                        shifted.groupby(rolling_df["team_id"], sort=False)
+                        .transform(lambda s, _w=w, _m=mp: s.rolling(_w, min_periods=_m).mean())
+                    )
 
         # Get model and feature cols
         from nba_betting.models.xgboost_model import load_feature_means
@@ -167,6 +165,20 @@ def predict(
                     extra["spread_movement"] = lm.get("spread_movement", 0.0)
                     extra["prob_movement"] = lm.get("prob_movement", 0.0)
                     extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
+
+                    # Player impact: WAT score, missing-minutes %, star-out flag.
+                    # `injuries` is set in the outer scope before predict_fn is called.
+                    try:
+                        from nba_betting.features.player_impact import (
+                            compute_player_impact_features,
+                        )
+                        extra.update(compute_player_impact_features(
+                            home_id, away_id, injuries,
+                            home_abbr=_game["home_team_abbr"],
+                            away_abbr=_game["away_team_abbr"],
+                        ))
+                    except Exception:
+                        pass  # Non-critical; model trained with 0 as neutral value
 
             feat_row = build_prediction_features(
                 home_id, away_id, rolling_df, home_elo, away_elo,
@@ -344,9 +356,10 @@ def train() -> None:
     console.print(f"  {len(X)} games, {len(feature_cols)} features")
     console.print(f"  Home win rate: {y.mean():.1%}")
 
-    # Walk-forward validation
+    # Walk-forward validation (return_oof=True so we can fit the meta-learner
+    # on honest out-of-fold predictions rather than in-sample predictions)
     console.print("\n[bold]Walk-forward validation...[/bold]")
-    results = walk_forward_validate(X, y)
+    results = walk_forward_validate(X, y, return_oof=True)
 
     if results["folds"]:
         from rich.table import Table
@@ -440,6 +453,34 @@ def train() -> None:
     feature_means = X.attrs.get("feature_means", {})
     save_model(model, feature_cols, feature_means)
     save_calibrated_model(calibrated)
+
+    # Fit stacked meta-learner on out-of-fold predictions from walk-forward.
+    # The meta-learner learns game-dependent Elo/GBM blending weights; it
+    # replaces the static grid-searched weight when present. Requires ≥ 200
+    # OOF games to avoid overfitting a logistic regression on too few points.
+    console.print("\n[bold]Fitting stacked meta-learner on OOF predictions...[/bold]")
+    oof_elo = results.get("oof_elo_probs", [])
+    oof_gbm = results.get("oof_gbm_cal_probs", [])
+    oof_y = results.get("oof_y_true", [])
+    if len(oof_y) >= 200:
+        try:
+            from nba_betting.models.stacking import fit_meta_model, save_meta_model
+            artifact = fit_meta_model(
+                np.array(oof_elo, dtype=float),
+                np.array(oof_gbm, dtype=float),
+                np.array(oof_y, dtype=int),
+            )
+            save_meta_model(artifact)
+            console.print(
+                f"  Fitted on {artifact['n_train']} OOF games — "
+                f"train log-loss={artifact['train_log_loss']:.4f}"
+            )
+        except Exception as e:
+            console.print(f"  [yellow]Skipped: {e}[/yellow]")
+    else:
+        console.print(
+            f"  [dim]Skipped — {len(oof_y)} OOF games available, need ≥ 200[/dim]"
+        )
 
     # Train spread + total regression heads on the same feature matrix.
     # Separate from the classifier: classification predicts the winner,

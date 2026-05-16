@@ -453,6 +453,18 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     # weight the non-zero rows accordingly.
     _attach_line_movement_features(game_features)
 
+    # Step 7d: Player impact features (WAT score, missing-minutes %,
+    # star-out flag). Historical games get 0.0 — no per-game player
+    # availability archive exists for the training set. Live predictions
+    # inject actual values via compute_player_impact_features at predict
+    # time. Same forward-accumulating convention as injury_impact.
+    for col in (
+        "home_missing_minutes_pct", "away_missing_minutes_pct",
+        "home_star_out", "away_star_out",
+        "diff_missing_minutes_pct", "diff_available_talent",
+    ):
+        game_features[col] = 0.0
+
     # Step 8: Select final feature columns
     model_features = (
         ["home_elo", "away_elo", "elo_diff", "elo_home_prob",
@@ -465,6 +477,10 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
         + ["rest_diff",
            "home_injury_impact_out", "away_injury_impact_out",
            "injury_impact_diff",
+           # Player availability features (0 for historical; live values injected at predict time).
+           "home_missing_minutes_pct", "away_missing_minutes_pct",
+           "home_star_out", "away_star_out",
+           "diff_missing_minutes_pct", "diff_available_talent",
            # Line-movement features (zero for pre-snapshot games).
            "spread_movement", "prob_movement", "odds_disagreement"]
     )

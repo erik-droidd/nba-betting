@@ -1227,3 +1227,47 @@ A full audit of the system's logic, calibration alignment, and hot paths:
   the recommendations layer doesn't compute a Kelly stake. Treat the
   spread/total picks as information bets only.
 - **Still no props / player-level modeling.** Out of scope for now.
+
+### 10.1d Closing dead-code gaps (2026-05)
+
+Two modules were fully implemented but never wired into the training or
+prediction pipelines:
+
+**Player impact features** (`features/player_impact.py`):
+
+`compute_player_impact_features()` computes 6 features — WAT score,
+missing-minutes %, and a star-out flag for each team — but was never
+called anywhere. Now wired:
+
+- `features/builder.py` step 7d adds all 6 columns as **0.0 for
+  historical games** (same forward-accumulating convention as
+  `injury_impact`). This gets them into `feature_cols.joblib` so the
+  model can learn their signal once live data accumulates.
+- `cli.py` `_xgb_predict` and `api/routes.py` `_predict` now call
+  `compute_player_impact_features` and inject the live values into
+  `extra_features` before `build_prediction_features`. The `injuries`
+  list from the outer scope is available via closure.
+- The Four Factors rolling loop in `cli.py`'s predict path was also
+  updated to the vectorized `groupby().transform()` form (matching the
+  `builder.py` training path, for consistency).
+
+**Stacked meta-learner** (`models/stacking.py`):
+
+`fit_meta_model` / `save_meta_model` existed in stacking.py but the
+`train` CLI command never called them, so `ensemble_meta.joblib` was
+never produced and `blend_predictions()` always fell back to the static
+log-odds blend.
+
+- `walk_forward_validate()` gains a `return_oof=True` flag. When set,
+  it appends per-fold `elo_home_prob` (from the feature matrix),
+  calibrated GBM probability, and ground-truth label into
+  `"oof_elo_probs"`, `"oof_gbm_cal_probs"`, `"oof_y_true"` arrays in
+  the return dict.
+- The `train` command calls `walk_forward_validate(X, y, return_oof=True)`
+  and, after saving the calibrated model and ensemble weight, fits a
+  logistic regression meta-learner on the OOF arrays when ≥ 200 OOF
+  games are available. The artifact is saved to
+  `trained_models/ensemble_meta.joblib`.
+- After the next `train` run, `blend_predictions()` will automatically
+  use the meta-learner (game-dependent Elo/GBM weights) instead of the
+  static grid-searched scalar.

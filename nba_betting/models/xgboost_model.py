@@ -101,10 +101,17 @@ def walk_forward_validate(
     y: pd.Series,
     n_splits: int = 3,
     params: dict = None,
+    return_oof: bool = False,
 ) -> dict:
     """Walk-forward validation across seasons.
 
     Splits data chronologically: trains on earlier data, tests on later.
+
+    Args:
+        return_oof: If True, also return out-of-fold prediction arrays
+            under keys ``"oof_elo_probs"``, ``"oof_gbm_cal_probs"``,
+            and ``"oof_y_true"``. Used by the training pipeline to fit
+            the stacked meta-learner on honest OOF predictions.
     """
     if params is None:
         params = DEFAULT_PARAMS.copy()
@@ -141,6 +148,10 @@ def walk_forward_validate(
     all_y_true = []
     all_y_pred = []
     all_y_pred_calibrated = []
+
+    oof_elo_probs: list[float] = []
+    oof_gbm_cal_probs: list[float] = []
+    oof_y_true: list[int] = []
 
     for i, split_date in enumerate(split_dates):
         train_mask = X_sorted["_date_parsed"] < split_date
@@ -229,6 +240,11 @@ def walk_forward_validate(
         all_y_pred.extend(y_prob.tolist())
         all_y_pred_calibrated.extend(y_prob_cal.tolist())
 
+        if return_oof and "elo_home_prob" in X_sorted.columns:
+            oof_elo_probs.extend(X_sorted.loc[test_mask, "elo_home_prob"].values.tolist())
+            oof_gbm_cal_probs.extend(y_prob_cal.tolist())
+            oof_y_true.extend(y_te.tolist())
+
     aggregate = {}
     if all_y_true:
         all_y_true_arr = np.array(all_y_true)
@@ -252,7 +268,12 @@ def walk_forward_validate(
             except Exception:
                 pass
 
-    return {"folds": fold_results, "aggregate": aggregate}
+    result = {"folds": fold_results, "aggregate": aggregate}
+    if return_oof:
+        result["oof_elo_probs"] = oof_elo_probs
+        result["oof_gbm_cal_probs"] = oof_gbm_cal_probs
+        result["oof_y_true"] = oof_y_true
+    return result
 
 
 def search_hyperparams(
