@@ -9,3 +9,5 @@
 {"game_date":"2026-05-22","home_team_abbr":"NYK","away_team_abbr":"CLE","source":"espn","timestamp":"2026-05-21T20:03:06","home_prob":0.6375,"spread":-5.5,"over_under":215.5,"game_id":null}
 {"game_date":"2026-05-22","home_team_abbr":"NYK","away_team_abbr":"CLE","source":"polymarket","timestamp":"2026-05-21T21:43:29","home_prob":0.645,"spread":null,"over_under":null,"game_id":"0042500302"}
 {"game_date":"2026-05-22","home_team_abbr":"NYK","away_team_abbr":"CLE","source":"espn","timestamp":"2026-05-21T21:43:29","home_prob":0.6375,"spread":-5.5,"over_under":215.5,"game_id":"0042500302"}
+{"game_date":"2026-05-22","home_team_abbr":"NYK","away_team_abbr":"CLE","source":"polymarket","timestamp":"2026-05-21T23:11:27","home_prob":0.645,"spread":null,"over_under":null,"game_id":"0042500302"}
+{"game_date":"2026-05-22","home_team_abbr":"NYK","away_team_abbr":"CLE","source":"espn","timestamp":"2026-05-21T23:11:27","home_prob":0.6375,"spread":-5.5,"over_under":215.5,"game_id":"0042500302"}
