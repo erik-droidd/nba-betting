@@ -613,6 +613,23 @@ honest out-of-fold data the calibrated GBM is the *weaker* model
 so it earns only ~10% of the blend. It still helps marginally: the
 blend's Brier/log-loss beat pure Elo's.
 
+> **Can the GBM be made to pull more weight?** Investigated thoroughly
+> (issue #23): regularization (shallower/fewer trees, higher `l2`,
+> `min_samples_leaf`), feature pruning to the top-k by permutation
+> importance, dropping the Elo features for orthogonality, and sigmoid
+> vs isotonic per-fold calibration. **None robustly beat the current
+> blend.** Every candidate landed within ~1 Brier SE (±0.006) and traded
+> the small early walk-forward fold for the recent one; feature pruning's
+> apparent gain was sensitive to the selection slice (sometimes +0.001,
+> sometimes −0.001 log-loss at the production weight), i.e. noise. The
+> honest conclusion: with the current feature set the GBM is a thin
+> complement and is correctly down-weighted. The real remaining lever is
+> **feature maturation** — the injury / line-movement / player-availability
+> features are still ~0 for historical games (§4.10) and only start
+> carrying signal once enough live-season data accumulates (see
+> `readiness-status`). Re-open the GBM question after a `READY` tier, not
+> before. Do not ship within-noise model-tuning changes to a live model.
+
 **Trained-but-not-wired — stacked meta-learner** (`models/stacking.py`):
 `train` also fits a logistic-regression meta-learner on the same OOF
 predictions (`[logit(p_elo), logit(p_gbm), |disagreement|]`) and saves it
