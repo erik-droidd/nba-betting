@@ -425,24 +425,41 @@ def train() -> None:
     cal_model.fit(X_train_part, y_train_part)
     calibrated = calibrate_model(cal_model, X_cal, y_cal)
 
-    # Evaluate calibration
-    cal_probs = calibrated.predict_proba(X_cal)[:, 1]
-    raw_probs = cal_model.predict_proba(X_cal)[:, 1]
-    cal_metrics = evaluate_calibration(y_cal, cal_probs)
-    raw_metrics = evaluate_calibration(y_cal, raw_probs)
+    # Calibration metrics — reported on the walk-forward OUT-OF-FOLD
+    # predictions, never on X_cal. Isotonic regression interpolates its own
+    # fit points, so evaluating `calibrated.predict_proba(X_cal)` on X_cal
+    # yields a meaningless ECE≈0.0000 (the old, misleading output). The OOF
+    # arrays were each scored by a model that never saw them.
+    oof_elo = np.array(results.get("oof_elo_probs", []), dtype=float)
+    oof_gbm = np.array(results.get("oof_gbm_cal_probs", []), dtype=float)
+    oof_y = np.array(results.get("oof_y_true", []), dtype=int)
+    have_oof = len(oof_y) >= 50
+    if have_oof:
+        raw_metrics = evaluate_calibration(oof_y, oof_elo)
+        cal_metrics = evaluate_calibration(oof_y, oof_gbm)
+        console.print(f"  Elo (out-of-fold): Brier={raw_metrics['brier_score']:.4f}, ECE={raw_metrics['ece']:.4f}")
+        console.print(f"  GBM (out-of-fold): Brier={cal_metrics['brier_score']:.4f}, ECE={cal_metrics['ece']:.4f}")
+    else:
+        # Fallback for tiny datasets with no usable OOF: in-sample slice,
+        # clearly labeled as optimistic.
+        cal_metrics = evaluate_calibration(y_cal, calibrated.predict_proba(X_cal)[:, 1])
+        console.print(f"  Calibrated (in-sample, optimistic): Brier={cal_metrics['brier_score']:.4f}, ECE={cal_metrics['ece']:.4f}")
 
-    console.print(f"  Raw:        Brier={raw_metrics['brier_score']:.4f}, ECE={raw_metrics['ece']:.4f}")
-    console.print(f"  Calibrated: Brier={cal_metrics['brier_score']:.4f}, ECE={cal_metrics['ece']:.4f}")
-
-    # Optimize the ensemble weight by grid-searching log-loss on the
-    # calibration slice. Compute Elo's per-row probability from the
-    # elo_home_prob feature already in X (which is exactly Elo's
-    # prediction with home-court advantage applied).
+    # Optimize the ensemble weight by grid-searching log-loss — on the SAME
+    # honest out-of-fold predictions, NOT the isotonic fit slice. Scoring the
+    # GBM in-sample (where isotonic looks perfect) while Elo is out-of-sample
+    # is an unfair comparison that biased the weight toward the GBM (old:
+    # w_elo≈0.30) even though the GBM is the weaker model out-of-sample.
+    # Production uses this static weight via `ensemble_predict`, so getting it
+    # right is worth ~+1pp accuracy / −0.03 log-loss on held-out games.
     console.print("\n[bold]Optimizing ensemble weight (Elo vs GBM)...[/bold]")
     from nba_betting.models.ensemble import learn_ensemble_weight, save_ensemble_weight
-    elo_cal_probs = X.iloc[-n_cal:]["elo_home_prob"].values.astype(float)
-    gbm_cal_probs = calibrated.predict_proba(X_cal)[:, 1]
-    best_weight, weight_table = learn_ensemble_weight(elo_cal_probs, gbm_cal_probs, y_cal)
+    if have_oof:
+        best_weight, weight_table = learn_ensemble_weight(oof_elo, oof_gbm, oof_y)
+    else:
+        elo_cal_probs = X.iloc[-n_cal:]["elo_home_prob"].values.astype(float)
+        gbm_cal_probs = calibrated.predict_proba(X_cal)[:, 1]
+        best_weight, weight_table = learn_ensemble_weight(elo_cal_probs, gbm_cal_probs, y_cal)
     save_ensemble_weight(best_weight)
     console.print(f"  Optimal Elo weight: {best_weight:.2f} (GBM weight: {1 - best_weight:.2f})")
     sorted_weights = sorted(weight_table.items())

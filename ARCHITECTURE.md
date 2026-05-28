@@ -501,7 +501,13 @@ ESPN sync + lineup bump adjustments.
 ### 5.1 Elo (`models/elo.py`)
 
 538-style Elo:
-- K-factor `ELO_K_FACTOR = 20`, home bonus `ELO_HOME_ADVANTAGE = 100`.
+- K-factor `ELO_K_FACTOR = 20`, home bonus `ELO_HOME_ADVANTAGE = 40`.
+  **Not 100** — the classic 538 value implies a 64% home-win prob at
+  equal Elo, but the modern NBA home edge has collapsed to ~55% (our
+  3-season sample: 54.7% / 54.6% / 55.6%). An end-to-end sweep that
+  recomputes both the ratings and the predictions at each value bottoms
+  out at ~40 on Brier, log-loss, **and** accuracy simultaneously, and
+  makes the mean Elo prediction match the empirical base rate. See §6.10.
 - MOV multiplier dampened by an **opponent-strength sigmoid**:
   `opp_factor = 1 / (1 + exp(-(elo_loser - elo_winner) / 200))`. A 30-point
   blowout over a weak opponent inflates ratings less than the same margin
@@ -556,45 +562,69 @@ vectorized; for the live prediction it's called directly per-team.
 
 ### 5.3 Calibration (`models/calibration.py`)
 
-**Default = isotonic** (not Platt/sigmoid). Reason: the home-win base
-rate is ~54.6%, which is near enough to 50% that Platt's sigmoid
-over-compresses the tails. On walk-forward folds, isotonic gives
-calibrated ECE ≈ 0.00 while Platt was 0.03-0.04 with visible
-tail-compression.
+**Default = isotonic** (not Platt/sigmoid) for the **final** model,
+calibrated on the full ~772-game tail slice: the home-win base rate is
+~54.6%, near enough to 50% that Platt's sigmoid over-compresses the tails.
+
+⚠ **Honest ECE is ~0.03, not ~0.00.** A prior version of this doc (and the
+`train` output) reported "calibrated ECE ≈ 0.00" — that was an **in-sample
+artifact**: isotonic regression interpolates its own fit points, so
+scoring it on the same slice it was fit on always looks near-perfect.
+On honest **out-of-fold** data the calibrated GBM's ECE is ~0.032 and
+Elo's is ~0.058 (now what `train` prints). The fix lives in §6.11.
+
+⚠ **Per-fold isotonic on small slices over-extremizes.** The final
+full-slice isotonic is fine, but the *per-fold* calibration inside
+`walk_forward_validate` fits isotonic on ~250-game slices, which pushes
+some probabilities to 0/1 and actually **loses** to sigmoid out-of-fold
+(per-fold OOF: isotonic acc 62.2% / ll 0.669 vs sigmoid 64.7% / 0.631).
+This only affects the OOF arrays that feed the meta-learner; production's
+final calibration is unaffected. Revisit if the meta-learner is ever
+wired into `predict`.
 
 Uses `CalibratedClassifierCV(cv="prefit")` wrapped in `FrozenEstimator`
 (required for sklearn ≥ 1.8, which removed direct prefit support).
 
 ### 5.4 Ensemble (`models/ensemble.py` + `models/stacking.py`)
 
-**Primary path — stacked meta-learner** (`models/stacking.py`):
-The `train` CLI command fits a logistic regression meta-learner on the
-walk-forward out-of-fold predictions (`return_oof=True`) and saves it
-to `trained_models/ensemble_meta.joblib` when ≥ 200 OOF games are
-available. `blend_predictions()` automatically uses it at prediction
-time. Features: `[logit(p_elo), logit(p_gbm), |logit(p_elo) - logit(p_gbm)|]`.
-Learns per-region weights — e.g., trusting Elo more when both models
-agree, GBM more in mid-range uncertainty. Falls back gracefully to the
-log-odds blend when the artifact is absent (fresh install, < 200 OOF games).
-
-**Fallback — log-odds (logit-space) blending**:
+**Production path — static log-odds (logit-space) blend** via
+`ensemble_predict()`:
 
 ```python
 z = w_elo · logit(p_elo) + (1 - w_elo) · logit(p_gbm)
 p_ensemble = sigmoid(z)
 ```
 
-Why log-odds: averaging probabilities compresses extremes. If Elo says
-90% and GBM says 70%, the probability average is 80%, but that implies
-the models are much less confident than both actually are. The log-odds
-average preserves the "both models agree it's a strong favorite"
-signal.
+This is what `cli.predict`, `api/routes.py`, and `backtest.py` actually
+call. Why log-odds: averaging probabilities compresses extremes. If Elo
+says 90% and GBM says 70%, the probability average is 80%, but that
+implies the models are much less confident than both actually are. The
+log-odds average preserves the "both models agree it's a strong
+favorite" signal.
 
 **Weight learning** (`learn_ensemble_weight()`): grid-search
-`w_elo ∈ [0.0, 0.1, ..., 1.0]` on the calibration fold, pick the one
-minimizing `sklearn.metrics.log_loss`. Persisted to
-`trained_models/ensemble_weight.joblib` and reloaded at prediction
-time. Typical learned value: ~0.3 (GBM-leaning after expanded features).
+`w_elo ∈ [0.0, 0.1, ..., 1.0]`, pick the one minimizing
+`sklearn.metrics.log_loss`, **on the walk-forward out-of-fold
+predictions** (not the isotonic calibration slice — see §6.11).
+Persisted to `trained_models/ensemble_weight.joblib` and reloaded at
+prediction time. Typical learned value: **~0.9 (Elo-leaning)** — on
+honest out-of-fold data the calibrated GBM is the *weaker* model
+(acc ~62-64% vs Elo's ~67% once Elo's home edge is calibrated, §6.10),
+so it earns only ~10% of the blend. It still helps marginally: the
+blend's Brier/log-loss beat pure Elo's.
+
+**Trained-but-not-wired — stacked meta-learner** (`models/stacking.py`):
+`train` also fits a logistic-regression meta-learner on the same OOF
+predictions (`[logit(p_elo), logit(p_gbm), |disagreement|]`) and saves it
+to `ensemble_meta.joblib` when ≥ 200 OOF games exist. It's reachable via
+`blend_predictions()`, **but no production caller currently uses
+`blend_predictions`** — every live path calls `ensemble_predict`. On the
+current data the fitted meta-learner is anyway Elo-dominated (coef ratio
+~37:1), i.e. it independently rediscovers the ~0.9 static weight, so the
+two paths agree. Wiring `blend_predictions` into `predict` is a candidate
+future change (game-dependent weighting), but only worthwhile once the
+meta-learner is trained on cleaner GBM inputs (its OOF GBM probs use
+per-fold isotonic, which over-extremizes on small slices — §6.11).
 
 ### 5.5 Bet sizing (`betting/kelly.py` + `betting/portfolio.py`)
 
@@ -605,9 +635,12 @@ Kelly fraction is scaled by three factors derived from the current bet signal:
   (5-15%), and tapers back to 0.5× for suspect (>15%) signals.
 - `clv_factor`: scales 1.15× when CLV t-stat > 1.5 (model historically
   beats the closing line), 0.7× when CLV < -1 (model historically fades).
-- `disagree_factor`: scales 0.85× when model-market logit gap is large,
-  0.65× when extreme — extra caution when conviction is based on outlier
-  disagreement.
+- `disagree_factor`: scales 0.85× when the model-market **probability gap**
+  `|p_model − p_market|` is large (≥0.15), 0.65× when extreme (≥0.20) —
+  extra caution when conviction rests on outlier disagreement. (The caller
+  passes the probability gap, not `edge`: passing `edge` double-counted the
+  `edge_factor` signal and let longshots — where `edge = gap/market` blows
+  up at small prices — masquerade as extreme disagreement.)
 
 The composite is clamped to `[0.25×, 1.25×]` of the base `KELLY_FRACTION`.
 
@@ -856,6 +889,78 @@ the market-null. The table puts horizon-invariant metrics first and
 labels every horizon-dependent metric with `@ horizon=N bets` so
 the dependency is unambiguous.
 
+### 6.10 Elo home-court advantage is calibrated, not the 538 default
+
+**Problem**: the inherited `ELO_HOME_ADVANTAGE = 100` is the classic
+FiveThirtyEight value, tuned to an older NBA where home teams won ~60%+
+of games. At equal Elo it implies P(home) = `expected_score(1500+100,
+1500)` = **0.640**. Our three seasons of data have a home-win rate of
+**0.550** (54.7% / 54.6% / 55.6% per season), so every Elo prediction
+carried a systematic **+8 to +9 pp home bias**. That bias propagated
+into the `elo_home_prob`, `home_elo`, `away_elo`, and `elo_diff`
+features the GBM consumes, into the log-odds ensemble (Elo gets ~30% of
+the blend weight), and into the `--model elo` path directly.
+
+**Fix**: `ELO_HOME_ADVANTAGE = 40`. Chosen by an **end-to-end sweep**
+that recomputes the entire rating history *and* the predictions at each
+candidate value (not just re-scoring fixed ratings — the home bonus also
+enters the rating update via `home_expected`), then evaluates on the
+walk-forward out-of-fold set with fixed GBM hyperparameters (no
+grid-search noise):
+
+| HA | Elo-only acc | Ensemble acc | Ensemble Brier | Ensemble log-loss |
+|----|:---:|:---:|:---:|:---:|
+| 100 | 62.6% | 63.9% | 0.2197 | 0.6295 |
+| 60  | 65.7% | 66.0% | 0.2143 | 0.6188 |
+| 50  | 66.1% | 66.6% | 0.2139 | 0.6179 |
+| **40** | **66.8%** | **66.8%** | **0.2130** | **0.6153** |
+| 35  | 67.1% | 66.9% | 0.2142 | 0.6182 |
+
+40 is the joint minimum of Brier and log-loss and is tied-best on
+accuracy, while making the mean Elo prediction (0.554) match the base
+rate (0.550). The GBM-*only* metrics are nearly flat across HA because
+its dominant feature `elo_diff` is a difference (the home bonus cancels)
+— so the **single `train`-table accuracy number understates this fix**;
+the gain shows up in the ensemble that `predict` actually uses
+(+2.9pp accuracy, −0.0067 Brier, −0.0142 log-loss vs the old default).
+
+**Do NOT revert to 100.** If a future NBA season's home edge rises,
+re-run the sweep rather than guessing — the optimum is the value whose
+mean Elo prediction equals the realized home-win rate.
+
+### 6.11 The ensemble weight must be learned out-of-fold, not in-sample
+
+**Problem**: `train` selected the static Elo-vs-GBM blend weight by
+grid-searching log-loss on the **isotonic calibration slice** — but it
+scored the *calibrated* GBM on the very slice the isotonic step was fit
+on. Isotonic regression interpolates its own fit points, so the GBM
+looked near-perfectly calibrated there (the tell-tale `ECE = 0.0000`),
+while Elo got no such in-sample boost. The comparison was rigged toward
+the GBM: it picked **w_elo ≈ 0.30** (70% weight on the GBM).
+
+On honest **out-of-fold** data the calibrated GBM is the *weaker* model
+(acc ~62%, log-loss 0.669) and Elo is stronger (acc ~67%, log-loss
+0.620, once §6.10 is applied). So the old weight put the majority of the
+blend on the worse model. Because **production blends via the static
+`ensemble_predict` weight** (the meta-learner is not wired in — §5.4),
+this directly degraded live predictions.
+
+**Fix**: select the weight (and report calibration ECE/Brier) on the
+walk-forward OOF arrays `learn_ensemble_weight(oof_elo, oof_gbm, oof_y)`
+— the same honest predictions the meta-learner trains on. The optimizer
+now picks **w_elo ≈ 0.90**. Measured on the OOF set:
+
+| Blend | Accuracy | Brier | Log-loss |
+|---|:---:|:---:|:---:|
+| old `w_elo = 0.30` (in-sample pick) | 65.8% | 0.2179 | 0.6459 |
+| new `w_elo = 0.90` (OOF pick) | **66.8%** | **0.2137** | **0.6166** |
+
+i.e. **+1.0pp accuracy and −0.029 log-loss in production**, on top of
+§6.10. The GBM isn't useless — at ~10% weight it still improves the
+blend's Brier/log-loss over pure Elo — it just shouldn't dominate. Never
+score a calibrated model on its own calibration set; if you need a
+single honest held-out number, use the OOF predictions.
+
 ---
 
 ## 7. Config knobs (`nba_betting/config.py`)
@@ -872,7 +977,7 @@ Everything worth tuning is in one file. The most impactful knobs:
 | `MAX_BET_PCT` | `0.05` | 5% of bankroll per bet |
 | `MAX_EXPOSURE_PCT` | `0.25` | 25% total simultaneous exposure |
 | `ELO_K_FACTOR` | `20.0` | Elo update speed |
-| `ELO_HOME_ADVANTAGE` | `100.0` | Home bonus in Elo points |
+| `ELO_HOME_ADVANTAGE` | `40.0` | Home bonus in Elo points — calibrated to the modern ~55% home-win rate, not the 538 default of 100. See §6.10 |
 | `ELO_CARRYOVER` | `0.75` | Season-to-season Elo persistence |
 | `NBA_API_DELAY_SECONDS` | `1.5` | NBA.com rate limit (reduced from 2.5) |
 | `ESPN_API_DELAY_SECONDS` | `0.8` | ESPN rate limit (reduced from 1.5) |
@@ -911,9 +1016,12 @@ print('OK')
 
 # 5. Walk-forward still in the expected range
 .venv/bin/python3 -m nba_betting train
-# Expect: WF accuracy 63-65%, Brier ~0.223, calibrated ECE < 0.02
-# New features (EWM, SOS-adj, pace, off/def Elo) should appear in top-10
-# permutation importance.
+# Expect: GBM-only WF accuracy 63-65%, Brier ~0.225, calibrated ECE < 0.02.
+# NOTE: this table is the GBM alone — it understates the system because
+# `elo_diff` (its top feature) is HA-invariant. The *ensemble* the live
+# `predict` uses scores ~66-67% accuracy / ~0.213 Brier on the same OOF
+# (see §6.10). New features (EWM, SOS-adj, pace, off/def Elo) should
+# appear in top-10 permutation importance.
 
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
@@ -988,8 +1096,14 @@ If this repo were gone and you had to rebuild it:
 - Edge computed against `p_shrunk`, not `p_model`.
 - UI shows `p_shrunk` in the Model column.
 - `MIN_BET_SIDE_PROB = 0.30` floor applied to `p_shrunk`, not `p_model`.
-- Isotonic (not Platt) calibration.
+- Isotonic (not Platt) calibration for the final full-slice model.
 - Log-odds (not probability-average) ensemble.
+- `ELO_HOME_ADVANTAGE` calibrated to the realized home-win rate (~40,
+  not the 538 default of 100) — §6.10.
+- Ensemble weight + calibration ECE measured **out-of-fold**, never on
+  the isotonic calibration slice (which fakes ECE≈0) — §6.11.
+- Kelly `disagree_factor` is fed the probability gap `|p_model−p_market|`,
+  not `edge` (avoids double-counting `edge_factor`).
 - ET timezone for "today", ScoreboardV3 not live ScoreBoard.
 - `load_model()` cached in `routes.py` (not called 3 times).
 - Driver attribution runs on the **base GBM**, not the calibrated

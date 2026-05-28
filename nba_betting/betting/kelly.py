@@ -121,12 +121,20 @@ def kelly_fraction(
         return 0.0
 
     # Tier 2.5 — scale lambda by signal strength when we have the inputs.
+    # `edge` is the multiplicative EV (prob/market - 1); the disagreement
+    # factor instead wants the *probability gap* (prob - market_price), as
+    # signal_dependent_lambda's own docstring/thresholds (0.15, 0.20) assume.
+    # Passing `edge` for both double-counted the same signal and let a
+    # longshot's modest gap masquerade as extreme disagreement (gap/market
+    # blows up at small market prices). Use the gap so the two factors are
+    # independent.
     edge = prob * (1.0 / market_price) - 1.0
+    prob_gap = prob - market_price
     effective_lambda = signal_dependent_lambda(
         lambda_,
         edge=edge,
         clv_tstat=clv_tstat,
-        model_market_disagreement=edge,
+        model_market_disagreement=prob_gap,
     )
 
     fractional = effective_lambda * full_kelly * max(0.0, min(1.0, drawdown_mult))

@@ -33,7 +33,18 @@ MIN_BET_SIDE_PROB = 0.30
 # Elo parameters (FiveThirtyEight)
 INITIAL_ELO = 1500.0
 ELO_K_FACTOR = 20.0
-ELO_HOME_ADVANTAGE = 100.0
+# Home-court advantage in Elo points. The classic FiveThirtyEight value
+# was 100 (≈ a 64% home-win prob at equal Elo), calibrated to an older,
+# higher-home-edge NBA. On our 3-season sample the actual home-win rate is
+# 55.0% (54.7% / 54.6% / 55.6% per season), and an end-to-end Elo sweep
+# (recomputing ratings AND predictions at each value) bottoms out at ~40:
+#   HA=100 -> mean_pred 0.634, Brier 0.2252, logloss 0.6403, acc 62.0%
+#   HA=40  -> mean_pred 0.554, Brier 0.2174, logloss 0.6251, acc 66.2%
+# 40 is the joint optimum on Brier, log-loss, and accuracy, and makes the
+# mean Elo prediction match the empirical base rate. Used in BOTH the Elo
+# update and the prediction, plus the `elo_home_prob` feature in builder.py
+# — recompute Elos (`sync`/compute_all_elos) and retrain after changing it.
+ELO_HOME_ADVANTAGE = 40.0
 ELO_CARRYOVER = 0.75
 
 # NBA API rate limiting. Tier 3.3 — 1.5s is the empirically observed
