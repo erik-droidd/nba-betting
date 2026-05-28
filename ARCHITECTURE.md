@@ -239,10 +239,11 @@ nba_betting/
 │   ├── montecarlo.py           — Monte Carlo bankroll simulation (resample
 │   │                              from backtest results).
 │   └── tracker.py              — record_predictions + update_results
-│                                 for prediction_history.json. Also stores
-│                                 bet_market_prob_at_pick for CLV tracking;
-│                                 update_closing_lines() fills clv_logit
-│                                 from the latest pre-tipoff snapshot.
+│                                 for prediction_history.json. Stores
+│                                 market_home_prob (pick-time price) for CLV;
+│                                 update_results() fills closing_market_prob
+│                                 and compute_clv() sets the log-odds CLV
+│                                 (close - bet), gated on ≥2 snapshots.
 │
 ├── display/
 │   └── console.py              — Rich-based terminal tables + panels.
@@ -672,10 +673,25 @@ default correlation matrix (same-day off-diagonal ρ = 0.05). Falls back
 to proportional per-bet Kelly haircut when the solver fails. For a single
 actionable bet the portfolio call is skipped — per-bet Kelly is exact.
 
-**Closing Line Value (CLV)** is tracked per bet: `bet_market_prob_at_pick`
-is stored by `record_predictions()`, and `update_closing_lines()` fills
-`clv_logit = bet_logit - close_logit` once the game closes. The `clv`
-CLI command reports per-bet CLV and a t-statistic over the rolling window.
+**Closing Line Value (CLV)** is tracked per bet. `record_predictions()`
+stores `market_home_prob` (the price at pick time) and `opening_market_prob`
+(earliest snapshot); `update_results()` fills `closing_market_prob` from the
+latest pre-game snapshot, then `compute_clv()` sets, **in log-odds space**:
+
+```
+clv = logit(close_side) - logit(bet_side)     # bet_side priced off market_home_prob
+```
+
+Positive ⇒ the line moved toward our side after we bet (we beat the close).
+**Note the sign:** it's `close − bet`, not `bet − close` — beating the close
+is positive. Two guards make the metric honest (see the `clv` review):
+- **Reference = the bet-time price** (`market_home_prob`), not the opening
+  snapshot — otherwise you measure total market drift, not your CLV.
+- **CLV is `None` unless ≥2 distinct snapshots exist** (`opening != closing`).
+  A single-snapshot game has `open==close` by construction; recording that as
+  `0` diluted the mean and inflated the sample. `compute_clv()` runs over the
+  whole history on every `update_results()`, so the definition is applied
+  retroactively. The `clv` CLI reports per-bet CLV (logit) and a t-statistic.
 
 ---
 
@@ -1270,9 +1286,10 @@ Three tiers of improvements shipped after the hardening pass:
   fold; best params reused for final training (see §5.2).
 - **Stacked meta-learner** — logistic regression on out-of-fold logits;
   present as `ensemble_meta.joblib`, falls back to log-odds blend (see §5.4).
-- **CLV tracking** — `bet_market_prob_at_pick` stored per prediction;
-  `update_closing_lines()` computes `clv_logit` post-game. `clv` CLI
-  command and `performance` table both surface CLV t-stat.
+- **CLV tracking** — `market_home_prob` (pick-time price) stored per
+  prediction; `update_results()` + `compute_clv()` compute the log-odds CLV
+  post-game (`close − bet`, gated on ≥2 snapshots). `clv` CLI command and
+  `performance` table both surface CLV (logit) + t-stat.
 - **Slate-level portfolio Kelly** — joint SLSQP optimization with Gaussian
   copula correlation for correlated same-day bets, wired into
   `recommendations.generate_recommendations` (see §5.5).
@@ -1387,9 +1404,10 @@ A full audit of the system's logic, calibration alignment, and hot paths:
   fresh install with limited history, the system silently falls back to
   the log-odds blend. This is intentional — a meta-learner on 1 fold
   would overfit badly.
-- **CLV bootstrapping** — `clv_logit` is only populated after a bet
-  resolves AND the odds snapshot collector captured a closing price. The
-  CLV t-stat becomes meaningful after ~30 bets with closing-line data.
+- **CLV bootstrapping** — `clv` is only populated after a bet resolves AND
+  the odds snapshot collector captured **≥2 snapshots** (a genuine closing
+  line distinct from the open). The CLV t-stat becomes meaningful after ~30
+  such bets — far fewer games qualify than total bets until coverage grows.
 - **Driver attribution is not exact Shapley** — it ignores feature
   interactions, so on trees with strong split dependencies the top
   driver can be slightly off. Good enough to cite in a sentence; don't

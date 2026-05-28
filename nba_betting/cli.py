@@ -706,8 +706,8 @@ def performance() -> None:
     if avg_clv is not None:
         clv_color = "green" if avg_clv > 0 else "red"
         table.add_row(
-            "Avg CLV",
-            f"[{clv_color}]{avg_clv:+.2%}[/{clv_color}] (n={clv_n})",
+            "Avg CLV (logit)",
+            f"[{clv_color}]{avg_clv:+.3f}[/{clv_color}] (n={clv_n})",
         )
         if clv_t is not None:
             t_color = "green" if clv_t >= 1.5 else ("yellow" if clv_t >= 0 else "red")
@@ -771,7 +771,7 @@ def clv(limit: int = 20) -> None:
     table.add_column("Side")
     table.add_column("Bet Price", justify="right")
     table.add_column("Close Price", justify="right")
-    table.add_column("CLV", justify="right")
+    table.add_column("CLV (logit)", justify="right")
     table.add_column("Result", justify="center")
 
     for r in recent:
@@ -785,7 +785,7 @@ def clv(limit: int = 20) -> None:
                 1.0 - r.closing_market_prob if r.closing_market_prob else None
             )
 
-        clv_color = "green" if r.clv > 0 else "red"
+        clv_color = "green" if r.clv > 0 else ("red" if r.clv < 0 else "dim")
         if r.profit is None:
             result_str = "[dim]pending[/dim]"
         elif r.profit > 0:
@@ -801,7 +801,7 @@ def clv(limit: int = 20) -> None:
             r.bet_side,
             f"{bet_price:.1%}" if bet_price else "-",
             f"{close_price:.1%}" if close_price else "-",
-            f"[{clv_color}]{r.clv:+.2%}[/{clv_color}]",
+            f"[{clv_color}]{r.clv:+.3f}[/{clv_color}]",
             result_str,
         )
 
@@ -818,7 +818,7 @@ def clv(limit: int = 20) -> None:
         summary.add_column("Value", justify="right")
         clv_color = "green" if avg_clv > 0 else "red"
         summary.add_row("Sample size", str(clv_n))
-        summary.add_row("Average CLV", f"[{clv_color}]{avg_clv:+.2%}[/{clv_color}]")
+        summary.add_row("Average CLV (logit)", f"[{clv_color}]{avg_clv:+.3f}[/{clv_color}]")
         if clv_t is not None:
             t_color = "green" if clv_t >= 1.5 else ("yellow" if clv_t >= 0 else "red")
             summary.add_row("t-statistic", f"[{t_color}]{clv_t:+.2f}[/{t_color}]")
