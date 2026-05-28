@@ -30,8 +30,10 @@ class PredictionRecord:
     opening_market_prob: float | None = None
     # Populated at result-resolution time from the latest pre-game snapshot.
     closing_market_prob: float | None = None
-    # CLV = (closing_prob_bet_side / opening_prob_bet_side) - 1
-    # Positive → we bet at a better price than the close (edge was real).
+    # CLV in log-odds: logit(close_bet_side) - logit(bet_price_bet_side),
+    # referenced off market_home_prob (the price at pick time). Positive →
+    # the line moved toward our side after we bet (we beat the close).
+    # None when no genuinely-tracked closing line exists. See compute_clv().
     clv: float | None = None
 
 
@@ -132,6 +134,42 @@ def record_predictions(recommendations) -> int:
     return new_count
 
 
+def compute_clv(record: PredictionRecord) -> float | None:
+    """Closing Line Value for one settled bet, in **log-odds** space.
+
+    ``CLV = logit(close_side) - logit(bet_side)`` for the side that was bet
+    (positive ⇒ the line moved toward our side after we bet, i.e. we got a
+    better price than the close — the gold-standard skill signal).
+
+    The reference is ``market_home_prob`` — the price at pick time, what we
+    actually bet at — NOT ``opening_market_prob`` (the earliest snapshot,
+    which measures total market drift, not our CLV).
+
+    Returns ``None`` (CLV undefined) when the bet is NO BET, a price is
+    missing/degenerate, or no genuinely-tracked closing line exists. We
+    require ≥2 distinct snapshot values (``opening_market_prob`` differs from
+    ``closing_market_prob``): a game with a single captured snapshot has
+    open==close by construction — "closing line not observed", not a real
+    0-CLV bet. Counting those as 0 diluted the average and inflated the n.
+    """
+    if record.bet_side not in ("HOME", "AWAY"):
+        return None
+    opening = record.opening_market_prob
+    close = record.closing_market_prob
+    bet = record.market_home_prob
+    if opening is None or close is None or bet is None:
+        return None
+    # Require a genuinely-tracked closing line (≥2 distinct snapshot values).
+    if abs(close - opening) <= 1e-9:
+        return None
+    bet_side_p = bet if record.bet_side == "HOME" else 1.0 - bet
+    close_side_p = close if record.bet_side == "HOME" else 1.0 - close
+    if not (0.0 < bet_side_p < 1.0 and 0.0 < close_side_p < 1.0):
+        return None
+    from nba_betting.utils.math import logit_scalar
+    return round(logit_scalar(close_side_p) - logit_scalar(bet_side_p), 4)
+
+
 def update_results() -> int:
     """Update historical predictions with actual game outcomes.
 
@@ -218,33 +256,26 @@ def update_results() -> int:
                 else:
                     record.profit = -record.bet_size
 
-            # CLV: fetch closing line (latest pre-game snapshot).
+            # CLV: fetch the closing line (latest pre-game snapshot) for this
+            # newly-resolved bet. The CLV value itself is (re)computed for
+            # every record after the loop via compute_clv().
             if record.closing_market_prob is None and record.bet_side != "NO BET":
                 try:
                     from nba_betting.data.odds_tracker import get_closing_line
-                    game_date = datetime.strptime(record.date, "%Y-%m-%d").date()
-                    closing = get_closing_line(game_date, home_id, away_id)
+                    closing = get_closing_line(record_date, home_id, away_id)
                     if closing and closing.get("home_prob"):
                         record.closing_market_prob = closing["home_prob"]
-
-                        # Compute CLV: compare closing price to the price
-                        # we actually bet at (market_home_prob at bet time).
-                        # Positive CLV = we got a better price than the close.
-                        opening_prob = record.opening_market_prob or record.market_home_prob
-                        close_p = record.closing_market_prob
-                        if record.bet_side == "HOME" and opening_prob > 0:
-                            # Closing home prob higher → home "got shorter"
-                            # → we bet at a better price (lower implied %).
-                            record.clv = (close_p / opening_prob) - 1.0
-                        elif record.bet_side == "AWAY" and opening_prob < 1:
-                            open_away = 1.0 - opening_prob
-                            close_away = 1.0 - close_p
-                            if open_away > 0:
-                                record.clv = (close_away / open_away) - 1.0
                 except Exception:
                     pass  # CLV is non-critical
 
             updated += 1
+
+        # (Re)compute CLV for EVERY record from stored prices — including
+        # already-resolved ones — so the log-odds definition and the
+        # single-snapshot gate also correct records computed under the prior
+        # (ratio, opening-reference) logic. Idempotent and deterministic.
+        for record in history:
+            record.clv = compute_clv(record)
 
         save_history(history)
         return updated

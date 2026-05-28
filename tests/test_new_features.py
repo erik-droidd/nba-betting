@@ -264,3 +264,48 @@ def test_apply_additive_migrations_is_idempotent(tmp_path, monkeypatch):
     _session.init_db()
     _session.init_db()  # second call must be a no-op — no error raised.
     assert test_db.exists()
+
+
+def test_compute_clv_logit_sign_reference_and_gating():
+    """CLV must be log-odds, referenced off the bet-time price, with
+    single-snapshot games excluded (issue: ratio/opening-reference/fake-0)."""
+    from nba_betting.betting.tracker import PredictionRecord, compute_clv
+    from nba_betting.utils.math import logit_scalar
+
+    def rec(**kw):
+        base = dict(
+            date="2026-01-01", home_team="AAA", away_team="BBB",
+            model_home_prob=0.5, market_home_prob=0.5, bet_side="HOME",
+            edge=0.0, bet_size=10.0,
+        )
+        base.update(kw)
+        return PredictionRecord(**base)
+
+    # HOME bet, line moved toward home (close > bet) -> positive CLV.
+    r = rec(market_home_prob=0.50, opening_market_prob=0.50, closing_market_prob=0.60)
+    assert compute_clv(r) == round(logit_scalar(0.60) - logit_scalar(0.50), 4)
+    assert compute_clv(r) > 0
+
+    # Reference is the BET price (market_home_prob), NOT opening_market_prob.
+    r_ref = rec(market_home_prob=0.50, opening_market_prob=0.52, closing_market_prob=0.60)
+    assert compute_clv(r_ref) == round(logit_scalar(0.60) - logit_scalar(0.50), 4)
+    assert compute_clv(r_ref) != round(logit_scalar(0.60) - logit_scalar(0.52), 4)
+
+    # HOME bet, line moved against us -> negative CLV.
+    assert compute_clv(rec(market_home_prob=0.55, opening_market_prob=0.60,
+                           closing_market_prob=0.50)) < 0
+
+    # AWAY bet: reference and close are the away side (1 - home prob).
+    a = compute_clv(rec(bet_side="AWAY", market_home_prob=0.50,
+                        opening_market_prob=0.55, closing_market_prob=0.45))
+    assert a == round(logit_scalar(0.55) - logit_scalar(0.50), 4)
+    assert a > 0
+
+    # Single-snapshot gate: opening == closing -> None (not a fake 0).
+    assert compute_clv(rec(market_home_prob=0.48, opening_market_prob=0.55,
+                           closing_market_prob=0.55)) is None
+
+    # Undefined cases -> None.
+    assert compute_clv(rec(bet_side="NO BET", opening_market_prob=0.5,
+                           closing_market_prob=0.6)) is None
+    assert compute_clv(rec(opening_market_prob=None, closing_market_prob=0.6)) is None
