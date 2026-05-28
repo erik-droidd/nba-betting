@@ -47,7 +47,7 @@ This will:
 - **Fit a stacked logistic meta-learner** on the walk-forward out-of-fold predictions [elo_logit, gbm_logit, |disagreement|] and save it to `trained_models/ensemble_meta.joblib` (requires ≥ 200 OOF games; falls back to the log-odds blend otherwise). The meta-learner learns game-dependent Elo/GBM weights instead of the static grid-searched scalar.
 - Save all model artifacts to `trained_models/`
 
-**Expected output**: ~62-65% walk-forward accuracy, Brier score ~0.22-0.24, calibrated ECE ~0.00-0.02.
+**Expected output**: ~63-65% walk-forward accuracy on the GBM-only table, Brier score ~0.22-0.24, calibrated ECE ~0.00-0.02. (The blended ensemble that `predict` actually uses scores higher — ~66-67% on the same out-of-fold games — because the Elo component is calibrated to the modern home-court edge; the single GBM table understates it since its top feature `elo_diff` cancels the home bonus.)
 
 ### 4. Sync Player Rosters (Optional, Improves Predictions)
 
