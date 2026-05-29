@@ -309,3 +309,48 @@ def test_compute_clv_logit_sign_reference_and_gating():
     assert compute_clv(rec(bet_side="NO BET", opening_market_prob=0.5,
                            closing_market_prob=0.6)) is None
     assert compute_clv(rec(opening_market_prob=None, closing_market_prob=0.6)) is None
+
+
+def test_build_prediction_features_imputes_missing_to_mean_not_zero():
+    """Regression guard for the train/predict skew: a genuinely-missing rolling
+    stat must be imputed to the TRAINING mean (as build_feature_matrix does),
+    not silently coerced to 0. The old `(x or 0)` made non-diff features like
+    matchup_pace (mean ~100 possessions) collapse to 0 at predict time."""
+    import numpy as np
+    from nba_betting.features.builder import (
+        build_prediction_features, _WINDOWS, _ROLLING_STATS,
+        _SOS_PACE_ROLLING_STATS, _SOS_PACE_WINDOWS, _EWM_STATS,
+    )
+
+    def _full_stats(team_id, poss10):
+        s = {"team_id": team_id, "date": "2026-01-10"}
+        for w in _WINDOWS:
+            for st in _ROLLING_STATS:
+                s[f"{st}_roll_{w}"] = 1.0
+            for ff in ("efg_pct", "tov_pct", "orb_pct", "ft_rate"):
+                s[f"{ff}_roll_{w}"] = 0.5
+        for w in (10, 20):
+            for st in ("plus_minus", "net_rtg_game"):
+                s[f"{st}_home_split_roll_{w}"] = 1.0
+                s[f"{st}_away_split_roll_{w}"] = 1.0
+        for w in (5, 10):
+            s[f"fg3_pct_b2b_roll_{w}"] = 0.35
+        for st in _SOS_PACE_ROLLING_STATS:
+            for w in _SOS_PACE_WINDOWS:
+                s[f"{st}_{w}"] = 100.0 if st == "poss_roll" else 1.0
+        for st in _EWM_STATS:
+            s[st] = 1.0
+        for rc in ("rest_days", "is_back_to_back", "games_last_7", "games_last_14"):
+            s[rc] = 2
+        s["poss_roll_10"] = poss10   # the stat under test
+        return s
+
+    # Home team's 10-game pace is MISSING (NaN); away team's is 100.
+    rolling_df = pd.DataFrame([_full_stats(1, np.nan), _full_stats(2, 100.0)])
+    feature_means = {"matchup_pace_10": 99.0}
+    row = build_prediction_features(1, 2, rolling_df, 1500.0, 1500.0, feature_means=feature_means)
+
+    assert row is not None, "a full stats row should not hit the >30% NaN fallback"
+    # (NaN home pace + 100 away) / 2 -> NaN -> imputed to the mean 99.0.
+    # The OLD buggy path gave (0 + 100) / 2 = 50.0.
+    assert row["matchup_pace_10"].iloc[0] == pytest.approx(99.0)

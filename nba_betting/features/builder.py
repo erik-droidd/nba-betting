@@ -793,17 +793,29 @@ def build_prediction_features(
         row[f"away_{col}"] = away_stats.get(col, 3 if col == "rest_days" else 0)
     row["rest_diff"] = row["home_rest_days"] - row["away_rest_days"]
 
+    # NaN-preserving lookup. A genuinely-missing rolling stat must stay NaN so
+    # the `fillna(feature_means)` below imputes it to the TRAINING mean —
+    # exactly what build_feature_matrix does. The old `(x or 0)` coerced
+    # missing → 0, which for non-diff features (e.g. matchup_pace, mean ~100
+    # possessions) fed the model a value far from training's imputation
+    # (a silent train/predict skew on early-season / data-gap games).
+    def _v(stats: dict, key: str) -> float:
+        val = stats.get(key)
+        return np.nan if val is None or pd.isna(val) else val
+
     # Rolling stat differentials
     for window in _WINDOWS:
         for stat in _ROLLING_STATS:
-            h_val = home_stats.get(f"{stat}_roll_{window}", 0)
-            a_val = away_stats.get(f"{stat}_roll_{window}", 0)
-            row[f"diff_{stat}_roll_{window}"] = (h_val or 0) - (a_val or 0)
+            row[f"diff_{stat}_roll_{window}"] = (
+                _v(home_stats, f"{stat}_roll_{window}") - _v(away_stats, f"{stat}_roll_{window}")
+            )
         for ff in four_factor_cols:
-            h_val = home_stats.get(f"{ff}_roll_{window}", 0)
-            a_val = away_stats.get(f"{ff}_roll_{window}", 0)
-            row[f"diff_{ff}_roll_{window}"] = (h_val or 0) - (a_val or 0)
-        # Pythagorean expectation differential — must mirror the training matrix
+            row[f"diff_{ff}_roll_{window}"] = (
+                _v(home_stats, f"{ff}_roll_{window}") - _v(away_stats, f"{ff}_roll_{window}")
+            )
+        # Pythagorean expectation differential — must mirror the training matrix.
+        # _pythagorean_expectation already returns a 0.5 "no-info" prior on
+        # missing inputs (consistent with the vectorized training path).
         h_pf = home_stats.get(f"pts_roll_{window}")
         h_pa = home_stats.get(f"pts_against_roll_{window}")
         a_pf = away_stats.get(f"pts_roll_{window}")
@@ -819,32 +831,28 @@ def build_prediction_features(
     _HA_SPLIT_WINDOWS_P = (10, 20)
     for w in _HA_SPLIT_WINDOWS_P:
         for s in _HA_SPLIT_STATS_P:
-            h_val = home_stats.get(f"{s}_home_split_roll_{w}")
-            a_val = away_stats.get(f"{s}_away_split_roll_{w}")
             row[f"diff_{s}_venue_roll_{w}"] = (
-                (h_val or 0) - (a_val or 0)
+                _v(home_stats, f"{s}_home_split_roll_{w}") - _v(away_stats, f"{s}_away_split_roll_{w}")
             )
 
     # Back-to-back 3PT cold differentials
     for w in (5, 10):
-        h_val = home_stats.get(f"fg3_pct_b2b_roll_{w}")
-        a_val = away_stats.get(f"fg3_pct_b2b_roll_{w}")
-        row[f"diff_fg3_pct_b2b_roll_{w}"] = (h_val or 0) - (a_val or 0)
+        row[f"diff_fg3_pct_b2b_roll_{w}"] = (
+            _v(home_stats, f"fg3_pct_b2b_roll_{w}") - _v(away_stats, f"fg3_pct_b2b_roll_{w}")
+        )
 
     # Tier 1.1 + 1.2 — SOS-adjusted net rating, pace, opp-Elo diffs.
     for stat in _SOS_PACE_ROLLING_STATS:
         for w in _SOS_PACE_WINDOWS:
-            h_val = home_stats.get(f"{stat}_{w}")
-            a_val = away_stats.get(f"{stat}_{w}")
-            row[f"diff_{stat}_{w}"] = (h_val or 0) - (a_val or 0)
+            h_val = _v(home_stats, f"{stat}_{w}")
+            a_val = _v(away_stats, f"{stat}_{w}")
+            row[f"diff_{stat}_{w}"] = h_val - a_val
             if stat == "poss_roll":
-                row[f"matchup_pace_{w}"] = ((h_val or 0) + (a_val or 0)) / 2.0
+                row[f"matchup_pace_{w}"] = (h_val + a_val) / 2.0
 
     # Tier 1.5 — EWM recent-form diffs.
     for stat in _EWM_STATS:
-        h_val = home_stats.get(stat)
-        a_val = away_stats.get(stat)
-        row[f"diff_{stat}"] = (h_val or 0) - (a_val or 0)
+        row[f"diff_{stat}"] = _v(home_stats, stat) - _v(away_stats, stat)
 
     # Injury features — mirror training. We use the current injuries
     # (today's live list) for inference, which matches how
