@@ -369,6 +369,21 @@ games strictly before the one we're predicting. Without it, the training
 target leaks into its own features and you'll see a completely
 uninterpretable 70%+ accuracy that collapses on live data.
 
+> ⚠ **Known limitation — predict-time one-game lag (not yet fixed).**
+> `build_prediction_features` reads each team's *latest stored row*
+> (`_get_latest_stats` → `iloc[-1]`), whose rolling value is the `shift(1)`
+> window — i.e. it **excludes that team's most recent completed game**. For
+> the *upcoming* game the correct window is "the last `w` completed games,
+> *including* the most recent." So live predictions use form that is one
+> game stale (confirmed: a team's `net_rtg_game_roll_5` read 16.8 at predict
+> when the last-5-including-latest mean was 21.4 — 27% off at `w=5`). A
+> correct fix recomputes the rolling **including** the latest game (e.g. by
+> appending a synthetic next-game row per team and re-running the `shift(1)`
+> rolling, so it works uniformly across the derived stats — SOS-adj, EWM,
+> venue splits). Deferred deliberately: it rewrites the predict feature path
+> and changes every live feature value, so it needs a predict-path backtest
+> harness to validate rather than a blind change.
+
 ### 4.3 Four Factors + rest + opponent rebound context
 
 `features/four_factors.py` adds eFG%, TOV%, ORB%, FT-rate per team-game.
@@ -1138,6 +1153,16 @@ If this repo were gone and you had to rebuild it:
 - Kelly `disagree_factor` is fed the probability gap `|p_model−p_market|`,
   not `edge` (avoids double-counting `edge_factor`).
 - ET timezone for "today", ScoreboardV3 not live ScoreBoard.
+- **Both predict paths must pass split off/def Elos** to
+  `build_prediction_features` (`home_elo_off/def`, `away_elo_off/def`), or the
+  off/def features silently degrade to aggregate Elo and diverge from
+  training. ⚠ The `predict` orchestration (model load → rolling pipeline →
+  the predict closure) is **duplicated** in `cli.py` and `api/routes.py`; this
+  invariant was violated once already — the CLI path omitted off/def Elos
+  while the API path passed them, so the primary path fed degraded features
+  (e.g. `home_off_vs_away_def` off by ~170 Elo for a team whose off/def split
+  is wide). **Extract a shared prediction service** so the two paths cannot
+  drift again (tracked as future work — the highest-value refactor here).
 - `load_model()` cached in `routes.py` (not called 3 times).
 - Driver attribution runs on the **base GBM**, not the calibrated
   wrapper, and is computed **lazily** (only for `bet_side != "NO BET"`).
