@@ -89,7 +89,11 @@ def predict(
         from nba_betting.features.rolling import compute_rolling_features
         from nba_betting.features.four_factors import add_four_factors, add_opponent_rebound_data
         from nba_betting.features.rest_days import add_rest_features
-        from nba_betting.features.builder import build_prediction_features
+        from nba_betting.features.builder import (
+            build_prediction_features,
+            compute_latest_stats_index,
+            compute_injury_impact_index,
+        )
 
         rolling_df = compute_rolling_features()
         if not rolling_df.empty:
@@ -149,9 +153,18 @@ def predict(
         )
         _regressors = _load_regs()
 
+        # Per-slate indices computed once (lazily, on first prediction — by
+        # which point injuries are synced), then reused for every game. Avoids
+        # the per-game teams-table scan + injuries.json read + rolling_df
+        # filter that build_prediction_features would otherwise repeat.
+        _idx_cache: dict = {}
+
         def _xgb_predict(home_elo, away_elo, home_id=None, away_id=None):
             if rolling_df is None or rolling_df.empty or not feature_cols:
                 return predict_home_win_prob(home_elo, away_elo)
+            if "latest" not in _idx_cache:
+                _idx_cache["latest"] = compute_latest_stats_index(rolling_df)
+                _idx_cache["injury"] = compute_injury_impact_index()
 
             # Inject live line-movement features at prediction time. The
             # `line_movements` dict in the outer scope is populated BEFORE
@@ -202,6 +215,8 @@ def predict(
                 home_elo_def=h_off_def[1] if h_off_def else None,
                 away_elo_off=a_off_def[0] if a_off_def else None,
                 away_elo_def=a_off_def[1] if a_off_def else None,
+                latest_stats_by_team=_idx_cache.get("latest"),
+                injury_impacts=_idx_cache.get("injury"),
             )
 
             # Fall back to Elo if too many features are missing

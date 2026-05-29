@@ -384,3 +384,55 @@ def test_build_prediction_features_imputes_missing_to_mean_not_zero():
     # (NaN home pace + 100 away) / 2 -> NaN -> imputed to the mean 99.0.
     # The OLD buggy path gave (0 + 100) / 2 = 50.0.
     assert row["matchup_pace_10"].iloc[0] == pytest.approx(99.0)
+
+
+def test_precomputed_latest_stats_index_is_behavior_preserving():
+    """Hoisting the latest-stats lookup (efficiency) must produce IDENTICAL
+    features to the per-call path, and pick the latest row by date."""
+    import numpy as np
+    import pandas as _pd
+    from nba_betting.features.builder import (
+        build_prediction_features, compute_latest_stats_index,
+        _WINDOWS, _ROLLING_STATS, _SOS_PACE_ROLLING_STATS, _SOS_PACE_WINDOWS, _EWM_STATS,
+    )
+
+    def _full(team_id, date, poss10):
+        s = {"team_id": team_id, "date": date}
+        for w in _WINDOWS:
+            for st in _ROLLING_STATS:
+                s[f"{st}_roll_{w}"] = 1.0
+            for ff in ("efg_pct", "tov_pct", "orb_pct", "ft_rate"):
+                s[f"{ff}_roll_{w}"] = 0.5
+        for w in (10, 20):
+            for st in ("plus_minus", "net_rtg_game"):
+                s[f"{st}_home_split_roll_{w}"] = 1.0
+                s[f"{st}_away_split_roll_{w}"] = 1.0
+        for w in (5, 10):
+            s[f"fg3_pct_b2b_roll_{w}"] = 0.35
+        for st in _SOS_PACE_ROLLING_STATS:
+            for w in _SOS_PACE_WINDOWS:
+                s[f"{st}_{w}"] = 100.0 if st == "poss_roll" else 1.0
+        for st in _EWM_STATS:
+            s[st] = 1.0
+        for rc in ("rest_days", "is_back_to_back", "games_last_7", "games_last_14"):
+            s[rc] = 2
+        s["poss_roll_10"] = poss10
+        return s
+
+    # Team 1 has two rows; the LATER date carries the value we expect.
+    rolling_df = _pd.DataFrame([
+        _full(1, "2026-01-01", 50.0),
+        _full(1, "2026-01-10", 100.0),
+        _full(2, "2026-01-10", 100.0),
+    ])
+    fm = {"matchup_pace_10": 99.0}
+    # injury_impacts={} on both sides keeps it DB-free and identical.
+    per_call = build_prediction_features(1, 2, rolling_df, 1500, 1500, feature_means=fm, injury_impacts={})
+    idx = compute_latest_stats_index(rolling_df)
+    precomp = build_prediction_features(
+        1, 2, rolling_df, 1500, 1500, feature_means=fm, injury_impacts={},
+        latest_stats_by_team=idx,
+    )
+    assert per_call is not None and precomp is not None
+    _pd.testing.assert_frame_equal(per_call, precomp)
+    assert idx[1]["poss_roll_10"] == 100.0  # latest-by-date row, not the 50.0 one
