@@ -41,8 +41,74 @@ from nba_betting.data.polymarket import (
     index_odds_by_pair,
     match_odds_for_game,
 )
-from nba_betting.db.models import OddsSnapshot, Team
+from nba_betting.db.models import Game, OddsSnapshot, Team
 from nba_betting.db.session import get_session
+
+
+def _resolve_game_for_snapshot(session, home_id, away_id, anchor_date):
+    """Resolve a snapshot to the DB game it was tracking.
+
+    Snapshots are captured *pre-tipoff* (often 1-2 days early), but their
+    JSONL ``game_date`` is the capture/UTC date — not the game's ET date that
+    ``Game.date`` / ``get_closing_line`` key on. We re-derive the canonical
+    game here at import time (the only place with DB access): match the team
+    pair to the **nearest upcoming** game around the capture moment.
+
+    Returns the ``Game`` or ``None`` if no plausible game exists (then the
+    caller keeps the record under its original date — harmless, it just won't
+    join). Matchups don't repeat within the ±window, so the choice is
+    unambiguous; the -1 day lower bound absorbs UTC-vs-ET for late tip-offs.
+    """
+    lo = anchor_date - timedelta(days=1)
+    hi = anchor_date + timedelta(days=3)
+    cands = session.execute(
+        select(Game)
+        .where(
+            Game.home_team_id == home_id,
+            Game.away_team_id == away_id,
+            Game.date >= lo,
+            Game.date <= hi,
+        )
+        .order_by(Game.date)
+    ).scalars().all()
+    if not cands:
+        return None
+    upcoming = [g for g in cands if g.date >= anchor_date]
+    if upcoming:
+        return upcoming[0]          # nearest upcoming (pre-tipoff capture)
+    return cands[-1]                # only past-in-window (UTC-late tip): nearest
+
+
+def reresolve_existing_snapshots() -> dict:
+    """One-time migration: re-derive ``game_date`` + ``game_id`` for every
+    stored snapshot via :func:`_resolve_game_for_snapshot`, fixing rows
+    imported under the old capture/UTC-date logic (which misfiled pre-tipoff
+    snapshots by 1-2 days, so they never joined a game). Idempotent —
+    re-running once correct is a no-op. Returns ``{total, updated, unmatched}``.
+    """
+    session = get_session()
+    try:
+        rows = session.execute(select(OddsSnapshot)).scalars().all()
+        updated = 0
+        unmatched = 0
+        for r in rows:
+            matched = _resolve_game_for_snapshot(
+                session, r.home_team_id, r.away_team_id, r.timestamp.date(),
+            )
+            if matched is None:
+                unmatched += 1
+                continue
+            if r.game_date != matched.date or r.game_id != matched.id:
+                r.game_date = matched.date
+                r.game_id = matched.id
+                updated += 1
+        session.commit()
+        return {"total": len(rows), "updated": updated, "unmatched": unmatched}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 # Default directory, relative to repo root. The GH Actions workflow
@@ -66,6 +132,12 @@ def _game_date_from_game(game: dict) -> str:
     We slice the first 10 chars — safer than ``datetime.fromisoformat``
     which chokes on the trailing ``Z`` in some Python versions.
     """
+    # Prefer the ET game-day (matches Game.date, which is NBA's GAME_DATE).
+    # Import re-resolves against the DB regardless, so this only has to be a
+    # good-enough anchor for games not in the DB.
+    et = game_date_et(game)
+    if et:
+        return et
     gtu = (game.get("game_time_utc") or "")[:10]
     if len(gtu) == 10 and gtu[4] == "-" and gtu[7] == "-":
         return gtu
@@ -420,6 +492,17 @@ def import_snapshots_jsonl(
                         errors.append(f"{fpath.name}:{line_no} unknown source {source!r}")
                         continue
 
+                    # Re-derive the canonical game from the DB. The JSONL
+                    # game_date is the capture/UTC date; Game.date is ET, so
+                    # trusting the JSONL misfiles pre-tipoff snapshots by 1-2
+                    # days and they never join (the 2%-coverage bug). Anchor on
+                    # the capture timestamp and snap to the real game.
+                    resolved_game_id = rec.get("game_id") or None
+                    matched = _resolve_game_for_snapshot(session, home_id, away_id, ts.date())
+                    if matched is not None:
+                        game_date = matched.date
+                        resolved_game_id = matched.id
+
                     # Idempotence check on the natural key. If present,
                     # skip — never update in place (fields should be
                     # immutable for a (game, source, timestamp) tuple).
@@ -439,7 +522,7 @@ def import_snapshots_jsonl(
                         continue
 
                     session.add(OddsSnapshot(
-                        game_id=rec.get("game_id") or None,
+                        game_id=resolved_game_id,
                         game_date=game_date,
                         home_team_id=home_id,
                         away_team_id=away_id,

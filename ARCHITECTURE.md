@@ -1144,8 +1144,16 @@ If this repo were gone and you had to rebuild it:
 - Backtest `apply_live_strategy` defaults to `None` and resolves from
   `use_real_odds` — never hard-code `True`, or Elo-proxy backtests
   become self-dampening.
-- Snapshot `game_date` is parsed from `game_time_utc[:10]`, not set to
-  `date.today()`, so upcoming-day snapshots join to the right game.
+- Snapshot `game_date` must equal the game's **ET** date (= `Game.date`), or
+  it won't join via `get_closing_line`. The GH runner is DB-free and can only
+  guess (UTC date, or capture date when `game_time_utc` is missing), so
+  **`import_snapshots_jsonl` re-resolves every record to the real DB game**
+  (`_resolve_game_for_snapshot`: nearest upcoming game to the capture
+  timestamp) and stores `Game.date` + `game_id`. Capture-side
+  `_game_date_from_game` prefers the ET date too, but import is authoritative.
+  `reresolve_existing_snapshots()` back-fills older rows. This was the
+  2%-coverage bug: pre-tipoff snapshots filed under the capture/UTC date
+  never joined (see §6.6 note).
 
 ---
 
@@ -1216,10 +1224,13 @@ Follow-on fixes to the 10.1 items after a post-implementation audit:
   lift). It's now `None` and resolves from `use_real_odds` as described
   above in §6.6 — preserves live-equivalent simulation when real odds
   are available while giving a clean raw-model benchmark otherwise.
-- **Snapshot game_date** — `snapshot_current_odds()` now parses
-  `game_time_utc[:10]` when `fetch_upcoming_games()` returns tomorrow's
-  slate, so snapshots are filed under the actual game date and
-  `get_closing_line()` joins cleanly at backtest time.
+- **Snapshot game_date** — snapshots must be filed under the game's **ET**
+  date to join `get_closing_line()`. Capture can only guess (UTC/capture
+  date), so `import_snapshots_jsonl` re-resolves each record to the real DB
+  game (`_resolve_game_for_snapshot`) and stores `Game.date` + `game_id`;
+  `reresolve_existing_snapshots()` fixes historical rows. Earlier this was
+  done UTC-side at capture, which misfiled pre-tipoff snapshots by 1-2 days
+  and capped real-odds coverage at ~2% (see §6.6 / invariants).
 - **Driver attribution on base GBM** — drivers are now computed
   against the uncalibrated base GBM (`load_model()[0]`) rather than
   the calibrated wrapper. Isotonic calibration is monotonic, so it
