@@ -692,6 +692,42 @@ def clv(limit: int = 20) -> None:
         console.print(summary)
 
 
+@app.command(name="predict-path-eval")
+def predict_path_eval(split: str = "2025-07-01") -> None:
+    """A/B the live prediction feature path on a walk-forward holdout.
+
+    Replays historical games through the REAL build_prediction_features and
+    compares the current (one-game-lagged) rolling lookup against an
+    include-latest "correct" variant. The only predict-path validation we
+    have — run it before changing any predict-time feature logic.
+    """
+    from nba_betting.betting.predict_path_eval import evaluate_predict_path
+    console.print(f"[dim]Replaying predict path on games >= {split} (trains on earlier)...[/dim]")
+    r = evaluate_predict_path(split=split)
+    if not r.get("n"):
+        console.print("[yellow]Not enough data to evaluate.[/yellow]")
+        return
+    from rich.table import Table
+    t = Table(title=f"Predict-path eval — {r['n']} held-out games", header_style="bold cyan")
+    t.add_column("Variant"); t.add_column("Accuracy", justify="right")
+    t.add_column("Brier", justify="right"); t.add_column("LogLoss", justify="right")
+    t.add_row("correct (include latest)", f"{r['correct']['accuracy']:.1%}",
+              f"{r['correct']['brier']:.4f}", f"{r['correct']['log_loss']:.4f}")
+    t.add_row("lagged (live, current)", f"{r['lagged']['accuracy']:.1%}",
+              f"{r['lagged']['brier']:.4f}", f"{r['lagged']['log_loss']:.4f}")
+    console.print(t)
+    d = r["delta"]
+    console.print(
+        f"[dim]delta (correct − lagged): acc={d['accuracy']:+.4f}  "
+        f"brier={d['brier']:+.4f}  logloss={d['log_loss']:+.4f}  | "
+        f"mean |Δprob| from the lag = {r['mean_abs_prob_change']:.4f}[/dim]"
+    )
+    if d["brier"] >= -0.001 and d["log_loss"] >= -0.001:
+        console.print("[green]→ The one-game lag is within noise; no fix warranted.[/green]")
+    else:
+        console.print("[yellow]→ Include-latest improves the holdout; worth implementing the fix.[/yellow]")
+
+
 @app.command()
 def diagnose() -> None:
     """Validate the prediction pipeline and check for common issues."""

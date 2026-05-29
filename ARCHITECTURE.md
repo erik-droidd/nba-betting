@@ -369,20 +369,22 @@ games strictly before the one we're predicting. Without it, the training
 target leaks into its own features and you'll see a completely
 uninterpretable 70%+ accuracy that collapses on live data.
 
-> ⚠ **Known limitation — predict-time one-game lag (not yet fixed).**
+> **Predict-time one-game lag — investigated, intentionally NOT fixed.**
 > `build_prediction_features` reads each team's *latest stored row*
 > (`_get_latest_stats` → `iloc[-1]`), whose rolling value is the `shift(1)`
-> window — i.e. it **excludes that team's most recent completed game**. For
-> the *upcoming* game the correct window is "the last `w` completed games,
-> *including* the most recent." So live predictions use form that is one
-> game stale (confirmed: a team's `net_rtg_game_roll_5` read 16.8 at predict
-> when the last-5-including-latest mean was 21.4 — 27% off at `w=5`). A
-> correct fix recomputes the rolling **including** the latest game (e.g. by
-> appending a synthetic next-game row per team and re-running the `shift(1)`
-> rolling, so it works uniformly across the derived stats — SOS-adj, EWM,
-> venue splits). Deferred deliberately: it rewrites the predict feature path
-> and changes every live feature value, so it needs a predict-path backtest
-> harness to validate rather than a blind change.
+> window — i.e. it **excludes that team's most recent completed game**. It
+> *looks* like a bug (a team's `net_rtg_game_roll_5` reads 16.8 at predict
+> when the last-5-including-latest mean is 21.4 — 27% off at `w=5`), and the
+> lag does move predictions ~7.6pp on average. **But it does not hurt
+> accuracy.** The `predict-path-eval` harness
+> (`betting/predict_path_eval.py`, `nba-betting predict-path-eval`) replays
+> ~1.3k held-out games through the real predict path and A/Bs lagged vs
+> include-latest: correct − lagged = **acc −0.7pp, Brier +0.001, log-loss
+> ≈0** — within noise and slightly *favorable* to the lag (the most recent
+> single game is noisy; excluding it de-noises the rolling estimate). So the
+> lag is left as-is. **Do not "fix" it without re-running the harness** — it
+> is the only tool that scores the *prediction* path end to end (the WF
+> validation in `train` only scores the *training* path).
 
 ### 4.3 Four Factors + rest + opponent rebound context
 
