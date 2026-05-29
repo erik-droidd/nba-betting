@@ -309,3 +309,33 @@ def test_compute_clv_logit_sign_reference_and_gating():
     assert compute_clv(rec(bet_side="NO BET", opening_market_prob=0.5,
                            closing_market_prob=0.6)) is None
     assert compute_clv(rec(opening_market_prob=None, closing_market_prob=0.6)) is None
+
+
+def test_with_retries_retries_transient_then_succeeds(monkeypatch):
+    """Data-layer resilience: a transient failure should retry, not bubble up
+    as 'no games' on the first blip."""
+    import nba_betting.data._net as net
+    monkeypatch.setattr(net.time, "sleep", lambda *_: None)  # no real backoff in test
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("transient")
+        return "ok"
+
+    assert net.with_retries(flaky, attempts=3, what="test") == "ok"
+    assert calls["n"] == 3
+
+
+def test_with_retries_reraises_after_exhausting(monkeypatch):
+    """After all attempts fail it re-raises (callers keep graceful fallback),
+    having logged a warning so the failure isn't silent."""
+    import nba_betting.data._net as net
+    monkeypatch.setattr(net.time, "sleep", lambda *_: None)
+
+    def always_fail():
+        raise TimeoutError("nope")
+
+    with pytest.raises(TimeoutError):
+        net.with_retries(always_fail, attempts=2, what="test")

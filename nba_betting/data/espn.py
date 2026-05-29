@@ -25,12 +25,18 @@ def _rate_limit() -> None:
 
 
 def _get(path: str, params: dict | None = None) -> dict:
-    """Make a rate-limited GET request to ESPN API."""
-    _rate_limit()
+    """Make a rate-limited, retrying GET request to ESPN API."""
+    from nba_betting.data._net import with_retries
+
     url = f"{ESPN_API_BASE}/{path}" if not path.startswith("http") else path
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+
+    def _call() -> dict:
+        _rate_limit()
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    return with_retries(_call, what=f"ESPN GET {path}")
 
 
 # ---------------------------------------------------------------------------
