@@ -1138,6 +1138,16 @@ If this repo were gone and you had to rebuild it:
 - Kelly `disagree_factor` is fed the probability gap `|p_model−p_market|`,
   not `edge` (avoids double-counting `edge_factor`).
 - ET timezone for "today", ScoreboardV3 not live ScoreBoard.
+- **Both predict paths must pass split off/def Elos** to
+  `build_prediction_features` (`home_elo_off/def`, `away_elo_off/def`), or the
+  off/def features silently degrade to aggregate Elo and diverge from
+  training. ⚠ The `predict` orchestration (model load → rolling pipeline →
+  the predict closure) is **duplicated** in `cli.py` and `api/routes.py`; this
+  invariant was violated once already — the CLI path omitted off/def Elos
+  while the API path passed them, so the primary path fed degraded features
+  (e.g. `home_off_vs_away_def` off by ~170 Elo for a team whose off/def split
+  is wide). **Extract a shared prediction service** so the two paths cannot
+  drift again (tracked as future work — the highest-value refactor here).
 - `load_model()` cached in `routes.py` (not called 3 times).
 - Driver attribution runs on the **base GBM**, not the calibrated
   wrapper, and is computed **lazily** (only for `bet_side != "NO BET"`).

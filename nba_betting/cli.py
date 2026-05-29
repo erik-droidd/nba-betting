@@ -49,6 +49,16 @@ def predict(
         console.print("[red]No Elo ratings found. Run 'nba-betting sync' first.[/red]")
         raise typer.Exit(1)
 
+    # Off/def split Elos — the model was trained on these (build_feature_matrix
+    # joins the stored split ratings). Without them the prediction-time off/def
+    # features degrade to the aggregate Elo, diverging from training AND from
+    # the API path (which already passes them). Load once; injected per game.
+    try:
+        from nba_betting.models.elo import get_current_off_def_elos
+        off_def_elos = get_current_off_def_elos()
+    except Exception:
+        off_def_elos = {}
+
     # Determine which model to use
     use_model = model
     xgb_loaded = None
@@ -180,10 +190,18 @@ def predict(
                     except Exception:
                         pass  # Non-critical; model trained with 0 as neutral value
 
+            # Inject split off/def Elo (mirrors api/routes.py) so the off/def
+            # features match training instead of falling back to aggregate Elo.
+            h_off_def = off_def_elos.get(home_id) if home_id else None
+            a_off_def = off_def_elos.get(away_id) if away_id else None
             feat_row = build_prediction_features(
                 home_id, away_id, rolling_df, home_elo, away_elo,
                 feature_means=feat_means,
                 extra_features=extra or None,
+                home_elo_off=h_off_def[0] if h_off_def else None,
+                home_elo_def=h_off_def[1] if h_off_def else None,
+                away_elo_off=a_off_def[0] if a_off_def else None,
+                away_elo_def=a_off_def[1] if a_off_def else None,
             )
 
             # Fall back to Elo if too many features are missing
