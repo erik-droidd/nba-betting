@@ -11,16 +11,8 @@ def get_predictions(bankroll: float = Query(1000.0)):
     """Get today's game predictions with model probabilities and market odds."""
     from nba_betting.data.nba_stats import fetch_todays_games, fetch_upcoming_games
     from nba_betting.data.polymarket import get_nba_odds
-    from nba_betting.models.elo import (
-        get_current_elos,
-        get_current_off_def_elos,
-        predict_home_win_prob,
-    )
-    from nba_betting.models.xgboost_model import load_model
-    from nba_betting.models.calibration import load_calibrated_model
-    from nba_betting.models.ensemble import ensemble_predict
+    from nba_betting.models.elo import get_current_elos, get_current_off_def_elos
     from nba_betting.betting.recommendations import generate_recommendations
-    from nba_betting.config import INITIAL_ELO
 
     games = fetch_todays_games()
     showing_date = None
@@ -41,142 +33,12 @@ def get_predictions(bankroll: float = Query(1000.0)):
     except Exception:
         off_def_elos = {}
 
-    # Try to load XGBoost (or its calibrated wrapper) for the ensemble.
-    # IMPORTANT: load_model() deserializes joblib from disk, so we cache
-    # it in a single variable instead of calling it multiple times.
-    model_name = "elo"
-    predict_fn = None
-    rolling_df = None
-
-    calibrated = load_calibrated_model()
-    xgb_result = load_model()  # (estimator, feature_cols) or None — call ONCE
-
-    if calibrated or xgb_result:
-        model_name = "ensemble"
-        from nba_betting.features.rolling import compute_rolling_features
-        from nba_betting.features.four_factors import add_four_factors, add_opponent_rebound_data
-        from nba_betting.features.rest_days import add_rest_features
-        from nba_betting.features.builder import (
-            build_prediction_features,
-            compute_latest_stats_index,
-            compute_injury_impact_index,
-        )
-        from nba_betting.models.xgboost_model import load_feature_means
-
-        rolling_df = compute_rolling_features()
-        if not rolling_df.empty:
-            rolling_df = add_four_factors(rolling_df)
-            rolling_df = add_opponent_rebound_data(rolling_df)
-            rolling_df = add_rest_features(rolling_df)
-
-            rolling_df = rolling_df.sort_values(["team_id", "date", "game_id"])
-            four_factor_cols = ["efg_pct", "tov_pct", "orb_pct", "ft_rate"]
-            for team_id, team_df in rolling_df.groupby("team_id"):
-                idx = team_df.index
-                for col in four_factor_cols:
-                    for w in (5, 10, 20):
-                        roll_col = f"{col}_roll_{w}"
-                        rolling_df.loc[idx, roll_col] = (
-                            team_df[col].shift(1)
-                            .rolling(window=w, min_periods=max(1, w // 2))
-                            .mean().values
-                        )
-
-        # When the calibrated wrapper is present we still need feature_cols
-        # from the underlying base estimator (the joblib payload of load_model).
-        actual_model = calibrated if calibrated else xgb_result[0]
-        feature_cols = xgb_result[1] if xgb_result else []
-        feat_means = load_feature_means()
-        # Prefer the base (uncalibrated) GBM for feature attribution: isotonic
-        # calibration distorts LOO-delta magnitudes even though it preserves
-        # ranking. See recommendations.generate_recommendations docstring.
-        driver_model = xgb_result[0] if xgb_result else actual_model
-
-        driver_contexts: dict = {}
-        spread_total_predictions: dict = {}
-        from nba_betting.models.spreads_totals import (
-            load_regressors as _load_regs,
-            predict_spread_total as _predict_st,
-        )
-        _regressors = _load_regs()
-
-        # Per-slate indices computed once (lazily), then reused per game —
-        # mirrors cli.predict; avoids the per-game teams scan + rolling filter.
-        _idx_cache: dict = {}
-
-        def _predict(home_elo, away_elo, home_id=None, away_id=None):
-            if rolling_df is None or rolling_df.empty or not feature_cols:
-                return predict_home_win_prob(home_elo, away_elo)
-            if "latest" not in _idx_cache:
-                _idx_cache["latest"] = compute_latest_stats_index(rolling_df)
-                _idx_cache["injury"] = compute_injury_impact_index()
-
-            # Inject live line-movement features at prediction time.
-            extra = {}
-            if home_id and away_id:
-                _game = next(
-                    (g for g in games
-                     if g["home_team_id"] == home_id and g["away_team_id"] == away_id),
-                    None,
-                )
-                if _game:
-                    lm = line_movements.get(
-                        (_game["home_team_abbr"], _game["away_team_abbr"]), {},
-                    )
-                    extra["spread_movement"] = lm.get("spread_movement", 0.0)
-                    extra["prob_movement"] = lm.get("prob_movement", 0.0)
-                    extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
-
-                    # Player impact features (injuries is set in outer scope).
-                    try:
-                        from nba_betting.features.player_impact import (
-                            compute_player_impact_features,
-                        )
-                        extra.update(compute_player_impact_features(
-                            home_id, away_id, injuries,
-                            home_abbr=_game["home_team_abbr"],
-                            away_abbr=_game["away_team_abbr"],
-                        ))
-                    except Exception:
-                        pass
-
-            # Tier 1.3 — inject split off/def Elo when available.
-            h_off_def = off_def_elos.get(home_id) if home_id else None
-            a_off_def = off_def_elos.get(away_id) if away_id else None
-            feat_row = build_prediction_features(
-                home_id, away_id, rolling_df, home_elo, away_elo,
-                feature_means=feat_means,
-                extra_features=extra or None,
-                home_elo_off=h_off_def[0] if h_off_def else None,
-                home_elo_def=h_off_def[1] if h_off_def else None,
-                away_elo_off=a_off_def[0] if a_off_def else None,
-                away_elo_def=a_off_def[1] if a_off_def else None,
-                latest_stats_by_team=_idx_cache.get("latest"),
-                injury_impacts=_idx_cache.get("injury"),
-            )
-            if feat_row is None:
-                return predict_home_win_prob(home_elo, away_elo)
-            for c in feature_cols:
-                if c not in feat_row.columns:
-                    feat_row[c] = feat_means.get(c, 0) if feat_means else 0
-            feat_row = feat_row[feature_cols]
-            xgb_prob = actual_model.predict_proba(feat_row)[0, 1]
-            # Stash the aligned row for lazy driver attribution in
-            # generate_recommendations (computed only for bets we'd actually
-            # take).
-            if home_id is not None and away_id is not None:
-                driver_contexts[(home_id, away_id)] = feat_row
-            if _regressors is not None and home_id is not None and away_id is not None:
-                try:
-                    spread_total_predictions[(home_id, away_id)] = _predict_st(
-                        feat_row, _regressors,
-                    )
-                except Exception:
-                    pass
-            elo_prob = predict_home_win_prob(home_elo, away_elo)
-            return ensemble_predict(elo_prob, xgb_prob)
-
-        predict_fn = _predict
+    # Build the shared prediction engine — the same module cli.predict uses,
+    # so the two paths can't diverge (they did once: the off/def-Elo bug #29).
+    from nba_betting.prediction_service import PredictionEngine
+    engine = PredictionEngine(games, off_def_elos, blend=True)
+    model_name = engine.model_name
+    predict_fn = engine.predict if engine.available else None
 
     try:
         market_odds = get_nba_odds()
@@ -227,14 +89,10 @@ def get_predictions(bankroll: float = Query(1000.0)):
     except Exception:
         pass
 
-    # Rolling context for explanations. rolling_df is initialized to None
-    # at the top of the function, so this check is safe whether or not the
-    # ensemble branch ran.
-    rolling_context = {}
-    if rolling_df is not None and not rolling_df.empty:
-        for tid, tdf in rolling_df.groupby("team_id"):
-            if not tdf.empty:
-                rolling_context[tid] = tdf.sort_values("date").iloc[-1].to_dict()
+    # Hand the engine the live context it predicts against, then recommend.
+    engine.injuries = injuries
+    engine.line_movements = line_movements
+    rolling_context = engine.rolling_context()
 
     recommendations = generate_recommendations(
         games, elos, market_odds, bankroll, predict_fn,
@@ -242,10 +100,10 @@ def get_predictions(bankroll: float = Query(1000.0)):
         rolling_context=rolling_context,
         line_movements=line_movements,
         espn_odds=espn_odds,
-        spread_total_predictions=locals().get("spread_total_predictions"),
-        driver_contexts=locals().get("driver_contexts"),
-        driver_model=locals().get("driver_model"),
-        driver_feature_means=locals().get("feat_means"),
+        spread_total_predictions=engine.spread_total_predictions,
+        driver_contexts=engine.driver_contexts,
+        driver_model=engine.driver_model,
+        driver_feature_means=engine.feat_means,
     )
 
     # Serialize

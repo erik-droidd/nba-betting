@@ -436,3 +436,21 @@ def test_precomputed_latest_stats_index_is_behavior_preserving():
     assert per_call is not None and precomp is not None
     _pd.testing.assert_frame_equal(per_call, precomp)
     assert idx[1]["poss_roll_10"] == 100.0  # latest-by-date row, not the 50.0 one
+
+
+def test_prediction_engine_contract():
+    """The shared PredictionEngine (used by both cli.predict and the API)
+    exposes a stable contract and always returns a valid probability — even
+    with no game context (Elo fallback)."""
+    from nba_betting.prediction_service import PredictionEngine
+    eng = PredictionEngine([], blend=True)
+    for attr in (
+        "available", "model_name", "driver_contexts",
+        "spread_total_predictions", "feat_means", "rolling_context",
+    ):
+        assert hasattr(eng, attr), attr
+    # No home/away ids -> no feature row -> Elo fallback; still a valid prob.
+    p = eng.predict(1600.0, 1400.0)
+    assert isinstance(p, float) and 0.0 < p < 1.0
+    # blend flag is honoured as an attribute.
+    assert eng.blend is True
