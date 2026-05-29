@@ -369,6 +369,21 @@ games strictly before the one we're predicting. Without it, the training
 target leaks into its own features and you'll see a completely
 uninterpretable 70%+ accuracy that collapses on live data.
 
+> ⚠ **Known limitation — predict-time one-game lag (not yet fixed).**
+> `build_prediction_features` reads each team's *latest stored row*
+> (`_get_latest_stats` → `iloc[-1]`), whose rolling value is the `shift(1)`
+> window — i.e. it **excludes that team's most recent completed game**. For
+> the *upcoming* game the correct window is "the last `w` completed games,
+> *including* the most recent." So live predictions use form that is one
+> game stale (confirmed: a team's `net_rtg_game_roll_5` read 16.8 at predict
+> when the last-5-including-latest mean was 21.4 — 27% off at `w=5`). A
+> correct fix recomputes the rolling **including** the latest game (e.g. by
+> appending a synthetic next-game row per team and re-running the `shift(1)`
+> rolling, so it works uniformly across the derived stats — SOS-adj, EWM,
+> venue splits). Deferred deliberately: it rewrites the predict feature path
+> and changes every live feature value, so it needs a predict-path backtest
+> harness to validate rather than a blind change.
+
 ### 4.3 Four Factors + rest + opponent rebound context
 
 `features/four_factors.py` adds eFG%, TOV%, ORB%, FT-rate per team-game.
