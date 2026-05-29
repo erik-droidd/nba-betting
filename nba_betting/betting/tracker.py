@@ -256,19 +256,29 @@ def update_results() -> int:
                 else:
                     record.profit = -record.bet_size
 
-            # CLV: fetch the closing line (latest pre-game snapshot) for this
-            # newly-resolved bet. The CLV value itself is (re)computed for
-            # every record after the loop via compute_clv().
-            if record.closing_market_prob is None and record.bet_side != "NO BET":
-                try:
-                    from nba_betting.data.odds_tracker import get_closing_line
-                    closing = get_closing_line(record_date, home_id, away_id)
-                    if closing and closing.get("home_prob"):
-                        record.closing_market_prob = closing["home_prob"]
-                except Exception:
-                    pass  # CLV is non-critical
-
             updated += 1
+
+        # Back-fill closing lines for ALL settled bets, not only the ones
+        # resolved in THIS call. The loop above `continue`s on already-resolved
+        # records, so a snapshot that becomes joinable only later (e.g. after
+        # the game-date migration in snapshot_jsonl) would otherwise never
+        # populate closing_market_prob. get_closing_line returns the latest
+        # pre-game snapshot for the game's ET date.
+        from nba_betting.data.odds_tracker import get_closing_line
+        for record in history:
+            if record.bet_side == "NO BET" or record.closing_market_prob is not None:
+                continue
+            hid = teams.get(record.home_team)
+            aid = teams.get(record.away_team)
+            if not hid or not aid:
+                continue
+            try:
+                rd = datetime.strptime(record.date, "%Y-%m-%d").date()
+                closing = get_closing_line(rd, hid, aid)
+                if closing and closing.get("home_prob"):
+                    record.closing_market_prob = closing["home_prob"]
+            except Exception:
+                pass  # CLV is non-critical
 
         # (Re)compute CLV for EVERY record from stored prices — including
         # already-resolved ones — so the log-odds definition and the

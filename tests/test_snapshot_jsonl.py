@@ -310,9 +310,11 @@ def test_capture_writes_jsonl_without_touching_db(tmp_path, monkeypatch):
     parsed = [json.loads(l) for l in lines]
     sources = {p["source"] for p in parsed}
     assert sources == {"polymarket", "espn"}
-    # Game_date should follow the game's UTC-day, which is the next day
-    # (19th) since the tipoff is at 00:00Z on the 19th.
-    assert all(p["game_date"] == "2026-04-19" for p in parsed)
+    # game_date is the game's ET day (matches Game.date / get_closing_line):
+    # the 00:00Z tip is 8 PM ET on the 18th, so the ET game-day is the 18th —
+    # NOT the UTC day (19th), which was the old misfiling bug that left
+    # snapshots unable to join their game.
+    assert all(p["game_date"] == "2026-04-18" for p in parsed)
 
 
 def test_capture_roundtrip_then_import(tmp_path, monkeypatch):
@@ -764,3 +766,85 @@ def test_parse_timestamp_drops_tz_to_match_existing_rows():
     assert ts_offset.tzinfo is None
     assert ts_naive.tzinfo is None
     assert ts_z == ts_offset == ts_naive
+
+
+def test_import_resolves_misfiled_pretipoff_date_to_upcoming_game(tmp_path, monkeypatch):
+    """The join bug: pre-tipoff snapshots are filed under the capture/UTC
+    date, not the game's ET date, so they never join (2%-coverage bug).
+    Import must re-resolve to the DB game — and when a recent PAST game and an
+    UPCOMING game both exist for the pair, pick the upcoming one (the snapshot
+    was captured before its tipoff)."""
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+
+    from datetime import date as _date
+    from nba_betting.db.models import Game, OddsSnapshot
+    from sqlalchemy import select
+
+    sess = session_module.get_session()
+    try:
+        # A played game 1 day before the capture, and the real upcoming game.
+        sess.add(Game(id="0042500041", home_team_id=1610612738, away_team_id=1610612747,
+                      date=_date(2026, 4, 15), season="2025-26",
+                      home_score=101, away_score=99))
+        sess.add(Game(id="0042500042", home_team_id=1610612738, away_team_id=1610612747,
+                      date=_date(2026, 4, 18), season="2025-26"))
+        sess.commit()
+    finally:
+        sess.close()
+
+    # Snapshot captured 2026-04-16 (pre-tipoff for the 04-18 game), but the
+    # JSONL game_date is wrong (the capture date).
+    rec = {
+        "game_date": "2026-04-16", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
+        "source": "polymarket", "timestamp": "2026-04-16T13:07:00",
+        "home_prob": 0.62, "spread": None, "over_under": None, "game_id": None,
+    }
+    jsonl_path = tmp_path / "snapshots" / "2026-04-16.jsonl"
+    _write_jsonl(jsonl_path, [rec])
+
+    assert jsonl.import_snapshots_jsonl(jsonl_path)["imported"] == 1
+
+    sess = session_module.get_session()
+    try:
+        row = sess.execute(select(OddsSnapshot)).scalars().one()
+        assert row.game_date == _date(2026, 4, 18)   # snapped to the upcoming game's ET date
+        assert row.game_id == "0042500042"             # linked to the upcoming game, not 0042500041
+    finally:
+        sess.close()
+
+
+def test_reresolve_existing_snapshots_fixes_misfiled_rows(tmp_path, monkeypatch):
+    """The one-time migration must re-date already-stored rows in place."""
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+
+    from datetime import date as _date, datetime as _dt
+    from nba_betting.db.models import Game, OddsSnapshot
+    from sqlalchemy import select
+
+    sess = session_module.get_session()
+    try:
+        sess.add(Game(id="0042500042", home_team_id=1610612738, away_team_id=1610612747,
+                      date=_date(2026, 4, 18), season="2025-26"))
+        # A row stored under the WRONG (capture) date with no game_id.
+        sess.add(OddsSnapshot(
+            game_id=None, game_date=_date(2026, 4, 16),
+            home_team_id=1610612738, away_team_id=1610612747,
+            source="polymarket", timestamp=_dt(2026, 4, 16, 13, 7, 0),
+            home_prob=0.62,
+        ))
+        sess.commit()
+    finally:
+        sess.close()
+
+    out = jsonl.reresolve_existing_snapshots()
+    assert out["updated"] == 1 and out["unmatched"] == 0
+
+    sess = session_module.get_session()
+    try:
+        row = sess.execute(select(OddsSnapshot)).scalars().one()
+        assert row.game_date == _date(2026, 4, 18)
+        assert row.game_id == "0042500042"
+    finally:
+        sess.close()
