@@ -59,200 +59,27 @@ def predict(
     except Exception:
         off_def_elos = {}
 
-    # Determine which model to use
+    # Determine which model to use and build the shared prediction engine
+    # (single source of truth for both predict paths — see
+    # nba_betting/prediction_service.py; replaces the closure formerly
+    # duplicated here and in api/routes.py, which had diverged — #29).
     use_model = model
-    xgb_loaded = None
-    calibrated_loaded = None
-    rolling_df = None
+    predict_fn = None
+    engine = None
 
     if use_model in ("auto", "xgb", "ensemble"):
-        calibrated_loaded = load_calibrated_model()
-        if calibrated_loaded is None:
-            xgb_result = load_model()
-            if xgb_result:
-                xgb_loaded = xgb_result
-        if use_model == "auto":
-            if calibrated_loaded or xgb_loaded:
+        console.print("[dim]Computing features for prediction...[/dim]")
+        from nba_betting.prediction_service import PredictionEngine
+        engine = PredictionEngine(games, off_def_elos, blend=(use_model != "xgb"))
+        if engine.available:
+            if use_model == "auto":
                 use_model = "ensemble"
                 console.print("[dim]Using ensemble model (Elo + XGBoost).[/dim]")
-            else:
-                use_model = "elo"
-                console.print("[dim]No trained XGBoost found. Using Elo model only.[/dim]")
-                console.print("[dim]Run 'nba-betting train' to build the XGBoost model.[/dim]")
-
-    # Build prediction function based on model choice
-    predict_fn = None
-
-    if use_model in ("xgb", "ensemble") and (calibrated_loaded or xgb_loaded):
-        # Load rolling features for XGBoost prediction
-        console.print("[dim]Computing features for prediction...[/dim]")
-        from nba_betting.features.rolling import compute_rolling_features
-        from nba_betting.features.four_factors import add_four_factors, add_opponent_rebound_data
-        from nba_betting.features.rest_days import add_rest_features
-        from nba_betting.features.builder import (
-            build_prediction_features,
-            compute_latest_stats_index,
-            compute_injury_impact_index,
-        )
-
-        rolling_df = compute_rolling_features()
-        if not rolling_df.empty:
-            rolling_df = add_four_factors(rolling_df)
-            rolling_df = add_opponent_rebound_data(rolling_df)
-            rolling_df = add_rest_features(rolling_df)
-
-            # Add rolling Four Factors (vectorized — matches builder.py training path)
-            import pandas as pd
-            rolling_df = rolling_df.sort_values(["team_id", "date", "game_id"])
-            four_factor_cols = ["efg_pct", "tov_pct", "orb_pct", "ft_rate"]
-            for col in four_factor_cols:
-                shifted = rolling_df.groupby("team_id", sort=False)[col].shift(1)
-                for w in (5, 10, 20):
-                    mp = max(1, w // 2)
-                    rolling_df[f"{col}_roll_{w}"] = (
-                        shifted.groupby(rolling_df["team_id"], sort=False)
-                        .transform(lambda s, _w=w, _m=mp: s.rolling(_w, min_periods=_m).mean())
-                    )
-
-        # Get model and feature cols
-        from nba_betting.models.xgboost_model import load_feature_means
-        feat_means = load_feature_means()
-
-        if calibrated_loaded:
-            actual_model = calibrated_loaded
-            # Feature cols from the base estimator
-            result = load_model()
-            feature_cols = result[1] if result else []
-            # For per-prediction attribution we prefer the uncalibrated
-            # base GBM: isotonic calibration is a monotonic post-hoc
-            # transform, so it distorts the *magnitudes* of
-            # leave-one-out deltas even though it preserves sign and
-            # ranking. Running attribution on the raw tree ensemble
-            # gives a more interpretable signal about which splits the
-            # model actually leaned on.
-            driver_model = (result[0] if result else actual_model)
+            predict_fn = engine.predict
         else:
-            actual_model, feature_cols = xgb_loaded
-            driver_model = actual_model
-
-        # We stash the aligned feature row per (home_id, away_id) so
-        # `generate_recommendations` can compute LOO-to-mean attribution
-        # *lazily* — only for games that actually clear the edge + floor
-        # gate. NO-BET rows don't render drivers anywhere, so computing
-        # them eagerly here would just waste a predict_proba pass per
-        # filtered game.
-        driver_contexts: dict = {}
-        spread_total_predictions: dict = {}
-
-        # Load the spread/total regressors once at predict-time. If they
-        # haven't been trained yet (old checkpoints) we silently fall
-        # back to no spread/total picks.
-        from nba_betting.models.spreads_totals import (
-            load_regressors as _load_regs,
-            predict_spread_total as _predict_st,
-        )
-        _regressors = _load_regs()
-
-        # Per-slate indices computed once (lazily, on first prediction — by
-        # which point injuries are synced), then reused for every game. Avoids
-        # the per-game teams-table scan + injuries.json read + rolling_df
-        # filter that build_prediction_features would otherwise repeat.
-        _idx_cache: dict = {}
-
-        def _xgb_predict(home_elo, away_elo, home_id=None, away_id=None):
-            if rolling_df is None or rolling_df.empty or not feature_cols:
-                return predict_home_win_prob(home_elo, away_elo)
-            if "latest" not in _idx_cache:
-                _idx_cache["latest"] = compute_latest_stats_index(rolling_df)
-                _idx_cache["injury"] = compute_injury_impact_index()
-
-            # Inject live line-movement features at prediction time. The
-            # `line_movements` dict in the outer scope is populated BEFORE
-            # `generate_recommendations` invokes predict_fn, so by the
-            # time this closure runs the data is available. Falls back
-            # to 0.0 (= "no movement data yet") if unavailable.
-            extra = {}
-            if home_id and away_id:
-                # line_movements is keyed by (home_abbr, away_abbr); we
-                # need to look it up. The closure can see the outer
-                # `games` list to map IDs → abbrs.
-                _game = next(
-                    (g for g in games
-                     if g["home_team_id"] == home_id and g["away_team_id"] == away_id),
-                    None,
-                )
-                if _game:
-                    lm = line_movements.get(
-                        (_game["home_team_abbr"], _game["away_team_abbr"]), {},
-                    )
-                    extra["spread_movement"] = lm.get("spread_movement", 0.0)
-                    extra["prob_movement"] = lm.get("prob_movement", 0.0)
-                    extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
-
-                    # Player impact: WAT score, missing-minutes %, star-out flag.
-                    # `injuries` is set in the outer scope before predict_fn is called.
-                    try:
-                        from nba_betting.features.player_impact import (
-                            compute_player_impact_features,
-                        )
-                        extra.update(compute_player_impact_features(
-                            home_id, away_id, injuries,
-                            home_abbr=_game["home_team_abbr"],
-                            away_abbr=_game["away_team_abbr"],
-                        ))
-                    except Exception:
-                        pass  # Non-critical; model trained with 0 as neutral value
-
-            # Inject split off/def Elo (mirrors api/routes.py) so the off/def
-            # features match training instead of falling back to aggregate Elo.
-            h_off_def = off_def_elos.get(home_id) if home_id else None
-            a_off_def = off_def_elos.get(away_id) if away_id else None
-            feat_row = build_prediction_features(
-                home_id, away_id, rolling_df, home_elo, away_elo,
-                feature_means=feat_means,
-                extra_features=extra or None,
-                home_elo_off=h_off_def[0] if h_off_def else None,
-                home_elo_def=h_off_def[1] if h_off_def else None,
-                away_elo_off=a_off_def[0] if a_off_def else None,
-                away_elo_def=a_off_def[1] if a_off_def else None,
-                latest_stats_by_team=_idx_cache.get("latest"),
-                injury_impacts=_idx_cache.get("injury"),
-            )
-
-            # Fall back to Elo if too many features are missing
-            if feat_row is None:
-                return predict_home_win_prob(home_elo, away_elo)
-
-            # Align columns
-            for col in feature_cols:
-                if col not in feat_row.columns:
-                    feat_row[col] = feat_means.get(col, 0) if feat_means else 0
-            feat_row = feat_row[feature_cols]
-
-            xgb_prob = actual_model.predict_proba(feat_row)[0, 1]
-
-            # Stash the aligned row for lazy driver attribution in
-            # `generate_recommendations`. We intentionally do NOT run
-            # `compute_prediction_drivers` here — the recommendation
-            # pipeline will only compute drivers for bets that clear
-            # the edge threshold.
-            if home_id is not None and away_id is not None:
-                driver_contexts[(home_id, away_id)] = feat_row
-
-            # Spread + total predictions share the same feature row.
-            if _regressors is not None and home_id is not None and away_id is not None:
-                try:
-                    st = _predict_st(feat_row, _regressors)
-                    spread_total_predictions[(home_id, away_id)] = st
-                except Exception:
-                    pass
-
-            if use_model == "ensemble":
-                elo_prob = predict_home_win_prob(home_elo, away_elo)
-                return ensemble_predict(elo_prob, xgb_prob)
-            return xgb_prob
-
-        predict_fn = _xgb_predict
+            use_model = "elo"
+            console.print("[dim]No trained XGBoost found. Using Elo model only.[/dim]")
+            console.print("[dim]Run 'nba-betting train' to build the XGBoost model.[/dim]")
 
     # Sync injuries from ESPN
     console.print("[dim]Syncing injuries from ESPN...[/dim]")
@@ -337,12 +164,13 @@ def predict(
     except Exception:
         pass  # Non-critical
 
-    # Build rolling context for explanations
-    rolling_context = {}
-    if rolling_df is not None and not rolling_df.empty:
-        for team_id, team_df in rolling_df.groupby("team_id"):
-            if not team_df.empty:
-                rolling_context[team_id] = team_df.sort_values("date").iloc[-1].to_dict()
+    # Hand the engine the live context it predicts against (injuries +
+    # line movements are finalized by now), then generate recommendations.
+    if engine is not None:
+        engine.injuries = injuries
+        engine.line_movements = line_movements
+
+    rolling_context = engine.rolling_context() if engine is not None else {}
 
     recommendations = generate_recommendations(
         games, elos, market_odds, bankroll,
@@ -351,10 +179,10 @@ def predict(
         rolling_context=rolling_context,
         line_movements=line_movements,
         espn_odds=espn_odds_data,
-        spread_total_predictions=locals().get("spread_total_predictions"),
-        driver_contexts=locals().get("driver_contexts"),
-        driver_model=locals().get("driver_model"),
-        driver_feature_means=locals().get("feat_means"),
+        spread_total_predictions=engine.spread_total_predictions if engine else None,
+        driver_contexts=engine.driver_contexts if engine else None,
+        driver_model=engine.driver_model if engine else None,
+        driver_feature_means=engine.feat_means if engine else None,
     )
     display_recommendations(recommendations, bankroll)
 
