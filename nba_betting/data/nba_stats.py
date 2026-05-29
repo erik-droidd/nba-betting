@@ -122,13 +122,19 @@ def _fetch_v3_games_for_date(target: date) -> list[dict]:
     """
     from nba_api.stats.endpoints import scoreboardv3
     import warnings as _warnings
+    from nba_betting.data._net import with_retries
 
-    try:
+    def _call() -> dict:
         _rate_limit()
         with _warnings.catch_warnings():
             _warnings.simplefilter("ignore")
             sb = scoreboardv3.ScoreboardV3(game_date=target.strftime("%Y-%m-%d"))
-        data = sb.get_dict()
+        return sb.get_dict()
+
+    try:
+        # Retry transient throttling/timeouts before giving up — otherwise a
+        # single blip silently looks like "no games scheduled".
+        data = with_retries(_call, what=f"ScoreboardV3 {target.isoformat()}")
     except Exception:
         return []
     return data.get("scoreboard", {}).get("games", []) or []

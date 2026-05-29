@@ -172,23 +172,30 @@ def _is_game_event(title: str) -> bool:
 
 def fetch_nba_game_events() -> list[dict]:
     """Fetch active NBA game-level events from Polymarket."""
+    from nba_betting.data._net import with_retries
+
     all_events = []
     offset = 0
 
     while True:
-        resp = requests.get(
-            f"{GAMMA_API_BASE}/events",
-            params={
-                "tag_slug": "nba",
-                "active": "true",
-                "closed": "false",
-                "limit": 100,
-                "offset": offset,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        _offset = offset
+
+        def _call() -> list:
+            resp = requests.get(
+                f"{GAMMA_API_BASE}/events",
+                params={
+                    "tag_slug": "nba",
+                    "active": "true",
+                    "closed": "false",
+                    "limit": 100,
+                    "offset": _offset,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        data = with_retries(_call, what=f"Polymarket events offset={offset}")
         if not data:
             break
 
