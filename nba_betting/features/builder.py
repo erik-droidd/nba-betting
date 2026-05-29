@@ -722,6 +722,54 @@ def _attach_line_movement_features(game_features: pd.DataFrame) -> None:
     game_features["odds_disagreement"] = disagree
 
 
+def compute_injury_impact_index() -> dict[int, float]:
+    """Map ``{team_id: total injury impact}`` from the current injuries list.
+
+    Hoisted out of ``build_prediction_features`` so a whole slate shares ONE
+    teams-table read + ONE injuries.json load instead of repeating them per
+    game. Impact per team = Σ ``impact_rating × status_multiplier`` over that
+    team's injured players — identical to the prior per-call computation.
+    """
+    from nba_betting.data.injuries import load_injuries, _status_multiplier
+    from nba_betting.db.models import Team
+    from nba_betting.db.session import get_session
+    from sqlalchemy import select
+
+    cur_injuries = load_injuries()
+    session = get_session()
+    try:
+        abbr_by_id = {
+            t.id: t.abbreviation
+            for t in session.execute(select(Team)).scalars().all()
+        }
+    finally:
+        session.close()
+
+    out: dict[int, float] = {}
+    for team_id, abbr in abbr_by_id.items():
+        total = 0.0
+        for inj in cur_injuries:
+            if inj.team_abbr.upper() == (abbr or "").upper():
+                total += (inj.impact_rating or 0.0) * _status_multiplier(inj.status or "")
+        if total:
+            out[team_id] = total
+    return out
+
+
+def compute_latest_stats_index(rolling_df: pd.DataFrame) -> dict[int, dict]:
+    """Map ``{team_id: latest_row_dict}`` from a rolling-features frame.
+
+    One ``groupby`` instead of filtering+sorting ``rolling_df`` per game in
+    ``build_prediction_features._get_latest_stats``.
+    """
+    if rolling_df is None or rolling_df.empty:
+        return {}
+    out: dict[int, dict] = {}
+    for team_id, g in rolling_df.groupby("team_id"):
+        out[int(team_id)] = g.sort_values("date").iloc[-1].to_dict()
+    return out
+
+
 def build_prediction_features(
     home_team_id: int,
     away_team_id: int,
@@ -734,6 +782,8 @@ def build_prediction_features(
     home_elo_def: float | None = None,
     away_elo_off: float | None = None,
     away_elo_def: float | None = None,
+    latest_stats_by_team: dict[int, dict] | None = None,
+    injury_impacts: dict[int, float] | None = None,
 ) -> pd.DataFrame | None:
     """Build a single-row feature vector for a prediction.
 
@@ -746,6 +796,13 @@ def build_prediction_features(
         feature_means: Training-set feature means for NaN imputation.
         extra_features: Additional prediction-time features (player impact,
             line movement, etc.) to merge into the feature row.
+        latest_stats_by_team: Optional precomputed ``{team_id: latest_row}``
+            index (see ``compute_latest_stats_index``). When a whole slate is
+            predicted, the caller builds this once instead of filtering+sorting
+            ``rolling_df`` per game. Falls back to a per-call lookup if absent.
+        injury_impacts: Optional precomputed ``{team_id: impact}`` index (see
+            ``compute_injury_impact_index``). Avoids opening a DB session +
+            scanning the teams table + reloading injuries.json on every game.
 
     Returns:
         Single-row DataFrame matching the training feature columns,
@@ -755,6 +812,8 @@ def build_prediction_features(
     rest_cols_list = ["rest_days", "is_back_to_back", "games_last_7", "games_last_14"]
 
     def _get_latest_stats(team_id: int) -> dict:
+        if latest_stats_by_team is not None:
+            return latest_stats_by_team.get(team_id, {})
         team_rows = rolling_df[rolling_df["team_id"] == team_id].sort_values("date")
         if team_rows.empty:
             return {}
@@ -856,34 +915,14 @@ def build_prediction_features(
 
     # Injury features — mirror training. We use the current injuries
     # (today's live list) for inference, which matches how
-    # `persist_historical_injuries` stores them for backtest. If the
+    # `persist_historical_injuries` stores them for backtest. When the caller
+    # predicts a whole slate it precomputes `injury_impacts` once (via
+    # compute_injury_impact_index) — otherwise we compute it per call. If the
     # lookup fails we fall back to 0 (treated as "unknown, average").
     try:
-        from nba_betting.data.injuries import load_injuries, _status_multiplier
-        from nba_betting.db.models import Team
-        from nba_betting.db.session import get_session
-        from sqlalchemy import select
-
-        cur_injuries = load_injuries()
-        session = get_session()
-        try:
-            abbr_by_id = {
-                t.id: t.abbreviation
-                for t in session.execute(select(Team)).scalars().all()
-            }
-        finally:
-            session.close()
-
-        def _impact_for(team_id: int) -> float:
-            abbr = abbr_by_id.get(team_id, "")
-            total = 0.0
-            for inj in cur_injuries:
-                if inj.team_abbr.upper() == abbr.upper():
-                    total += (inj.impact_rating or 0.0) * _status_multiplier(inj.status or "")
-            return total
-
-        row["home_injury_impact_out"] = _impact_for(home_team_id)
-        row["away_injury_impact_out"] = _impact_for(away_team_id)
+        impacts = injury_impacts if injury_impacts is not None else compute_injury_impact_index()
+        row["home_injury_impact_out"] = impacts.get(home_team_id, 0.0)
+        row["away_injury_impact_out"] = impacts.get(away_team_id, 0.0)
     except Exception:
         row["home_injury_impact_out"] = 0.0
         row["away_injury_impact_out"] = 0.0
