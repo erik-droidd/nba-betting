@@ -69,7 +69,7 @@ class PredictionEngine:
 
         from nba_betting.features.rolling import compute_rolling_features
         from nba_betting.features.four_factors import (
-            add_four_factors, add_opponent_rebound_data,
+            add_four_factors, add_opponent_rebound_data, add_rolling_four_factors,
         )
         from nba_betting.features.rest_days import add_rest_features
 
@@ -78,17 +78,9 @@ class PredictionEngine:
             rolling_df = add_four_factors(rolling_df)
             rolling_df = add_opponent_rebound_data(rolling_df)
             rolling_df = add_rest_features(rolling_df)
-            # Rolling Four Factors — vectorized groupby.transform, matching the
-            # training path in builder.build_feature_matrix.
-            rolling_df = rolling_df.sort_values(["team_id", "date", "game_id"])
-            for col in ("efg_pct", "tov_pct", "orb_pct", "ft_rate"):
-                shifted = rolling_df.groupby("team_id", sort=False)[col].shift(1)
-                for w in (5, 10, 20):
-                    mp = max(1, w // 2)
-                    rolling_df[f"{col}_roll_{w}"] = (
-                        shifted.groupby(rolling_df["team_id"], sort=False)
-                        .transform(lambda s, _w=w, _m=mp: s.rolling(_w, min_periods=_m).mean())
-                    )
+            # Rolling Four Factors — the SAME shared transform as the training
+            # path in builder.build_feature_matrix (single source of truth).
+            rolling_df = add_rolling_four_factors(rolling_df)
         self.rolling_df = rolling_df
 
         # The calibrated wrapper is the prediction model; feature_cols come from
@@ -105,13 +97,18 @@ class PredictionEngine:
         self.available = True
 
     def rolling_context(self) -> dict:
-        """`{team_id: latest_rolling_row}` for explanation generation."""
-        ctx: dict = {}
-        if self.rolling_df is not None and not self.rolling_df.empty:
-            for team_id, tdf in self.rolling_df.groupby("team_id"):
-                if not tdf.empty:
-                    ctx[team_id] = tdf.sort_values("date").iloc[-1].to_dict()
-        return ctx
+        """`{team_id: latest_rolling_row}` for explanation generation.
+
+        Same index ``predict`` uses for feature building — computed once per
+        slate and shared via ``_idx_cache`` instead of re-grouping the full
+        rolling frame a second time.
+        """
+        if self.rolling_df is None or self.rolling_df.empty:
+            return {}
+        if "latest" not in self._idx_cache:
+            from nba_betting.features.builder import compute_latest_stats_index
+            self._idx_cache["latest"] = compute_latest_stats_index(self.rolling_df)
+        return self._idx_cache["latest"]
 
     def predict(self, home_elo, away_elo, home_id=None, away_id=None) -> float:
         from nba_betting.features.builder import (
@@ -126,9 +123,11 @@ class PredictionEngine:
             return predict_home_win_prob(home_elo, away_elo)
 
         # Lazily build the per-slate indices on first use (injuries are synced
-        # by the caller before the first predict call).
+        # by the caller before the first predict call). Keys are independent:
+        # rolling_context() may have already filled "latest".
         if "latest" not in self._idx_cache:
             self._idx_cache["latest"] = compute_latest_stats_index(rolling_df)
+        if "injury" not in self._idx_cache:
             self._idx_cache["injury"] = compute_injury_impact_index()
 
         extra: dict = {}

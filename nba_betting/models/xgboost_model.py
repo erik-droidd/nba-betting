@@ -102,6 +102,7 @@ def walk_forward_validate(
     n_splits: int = 3,
     params: dict = None,
     return_oof: bool = False,
+    per_fold_calibration: str = "sigmoid",
 ) -> dict:
     """Walk-forward validation across seasons.
 
@@ -112,6 +113,15 @@ def walk_forward_validate(
             under keys ``"oof_elo_probs"``, ``"oof_gbm_cal_probs"``,
             and ``"oof_y_true"``. Used by the training pipeline to fit
             the stacked meta-learner on honest OOF predictions.
+        per_fold_calibration: Calibration method for the per-fold holdout
+            slice ("sigmoid" or "isotonic"). Default is sigmoid: the
+            per-fold calibration set is only ~250 games, and isotonic on a
+            slice that small over-extremizes (pushes probabilities to 0/1)
+            — it measurably loses to sigmoid out-of-fold (see ARCHITECTURE
+            §5.3). This only affects the per-fold/OOF probabilities (which
+            feed the ensemble-weight grid search and the meta-learner); the
+            FINAL production model is still calibrated with isotonic on the
+            full ~770-game tail slice, where isotonic is the right choice.
     """
     if params is None:
         params = DEFAULT_PARAMS.copy()
@@ -166,12 +176,12 @@ def walk_forward_validate(
         if train_mask.sum() < 100 or test_mask.sum() < 50:
             continue
 
-        # Per-fold isotonic calibration (#6 improvement): hold out the
-        # last 20% of the training fold as a calibration set. The model
-        # is fit on the first 80%, isotonic is fit on the held-out 20%,
-        # and the test fold is scored with the calibrated probabilities.
-        # This mirrors what happens at train time and gives honest
-        # per-fold ECE numbers.
+        # Per-fold calibration (#6 improvement): hold out the last 20% of
+        # the training fold as a calibration set. The model is fit on the
+        # first 80%, the calibrator on the held-out 20%, and the test fold
+        # is scored with the calibrated probabilities. This mirrors what
+        # happens at train time and gives honest per-fold ECE numbers.
+        # Method = sigmoid by default (see per_fold_calibration docstring).
         train_idx = X_sorted.index[train_mask]
         cal_cutoff = int(len(train_idx) * 0.8)
         train_fit_idx = train_idx[:cal_cutoff]
@@ -203,7 +213,7 @@ def walk_forward_validate(
         if X_cal is not None and y_cal is not None and len(y_cal) >= 20:
             try:
                 from nba_betting.models.calibration import calibrate_model, evaluate_calibration
-                cal_model = calibrate_model(model, X_cal, y_cal, method="isotonic")
+                cal_model = calibrate_model(model, X_cal, y_cal, method=per_fold_calibration)
                 y_prob_cal = cal_model.predict_proba(X_te)[:, 1]
                 cal_eval = evaluate_calibration(y_te, y_prob_cal)
                 cal_ece = cal_eval["ece"]

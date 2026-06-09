@@ -36,7 +36,9 @@ def _build_rolling_like_engine() -> pd.DataFrame:
     """Reproduce the rolling frame the PredictionEngine builds (incl. the
     vectorized Four-Factors reroll)."""
     from nba_betting.features.rolling import compute_rolling_features
-    from nba_betting.features.four_factors import add_four_factors, add_opponent_rebound_data
+    from nba_betting.features.four_factors import (
+        add_four_factors, add_opponent_rebound_data, add_rolling_four_factors,
+    )
     from nba_betting.features.rest_days import add_rest_features
 
     rdf = compute_rolling_features()
@@ -45,15 +47,7 @@ def _build_rolling_like_engine() -> pd.DataFrame:
     rdf = add_four_factors(rdf)
     rdf = add_opponent_rebound_data(rdf)
     rdf = add_rest_features(rdf)
-    rdf = rdf.sort_values(["team_id", "date", "game_id"])
-    for col in ("efg_pct", "tov_pct", "orb_pct", "ft_rate"):
-        sh = rdf.groupby("team_id", sort=False)[col].shift(1)
-        for w in (5, 10, 20):
-            rdf[f"{col}_roll_{w}"] = (
-                sh.groupby(rdf["team_id"], sort=False)
-                .transform(lambda s, _w=w: s.rolling(_w, min_periods=max(1, _w // 2)).mean())
-            )
-    return rdf
+    return add_rolling_four_factors(rdf)
 
 
 def evaluate_predict_path(split: str = "2025-07-01") -> dict:
