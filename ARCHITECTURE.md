@@ -146,7 +146,17 @@ nba_betting/
 │   ├── four_factors.py         — eFG%, TOV%, ORB%, FT-rate (Dean Oliver).
 │   │                              opp_dreb now vectorized via groupby
 │   │                              transform (no per-row apply).
+│   │                              add_rolling_four_factors() is the SHARED
+│   │                              rolling step used by builder (training),
+│   │                              PredictionEngine (inference), and
+│   │                              predict_path_eval — one source of truth.
 │   ├── rest_days.py            — rest_days, is_b2b, games_last_7/14.
+│   │                              Vectorized (per-team date diff +
+│   │                              searchsorted window counts); the old
+│   │                              per-game past-date rescan was O(n²) and
+│   │                              alone cost ~5.7s of the ~6.3s feature
+│   │                              build. Equivalence pinned by
+│   │                              tests/test_rest_features.py.
 │   ├── player_impact.py        — ESPN-driven player features: WAT score,
 │   │                              missing_minutes_pct, star_out flag.
 │   │                              compute_player_impact_features() is called
@@ -554,16 +564,18 @@ vectorized; for the live prediction it's called directly per-team.
   the filename/artifact is historical; we swapped for hist-GBM because
   it handles NaN natively and trains faster on this scale.
 - Walk-forward validation with July 1 season boundaries
-  (`walk_forward_validate(n_splits, return_oof)`). When `return_oof=True`
-  (used by the `train` CLI), per-fold OOF arrays
+  (`walk_forward_validate(n_splits, return_oof, per_fold_calibration)`).
+  When `return_oof=True` (used by the `train` CLI), per-fold OOF arrays
   (`oof_elo_probs`, `oof_gbm_cal_probs`, `oof_y_true`) are returned for
-  meta-learner fitting.
-- **Per-fold hyperparameter grid search** (`search_hyperparams()`): each
-  WF fold runs an 8-combo grid over `max_depth ∈ {4,5}`,
-  `learning_rate ∈ {0.03,0.05}`, `max_iter ∈ {300,500}`, and
-  `l2_regularization ∈ {0,0.1}`, picking the combo with best held-out
-  log-loss on a 15% calibration slice. Best params saved to
-  `trained_models/best_params.joblib` and reloaded for final training.
+  meta-learner fitting. Per-fold calibration defaults to **sigmoid**
+  (isotonic over-extremizes on small fold slices — §5.3).
+- **Hyperparameter grid search exists but is NOT wired into `train`**
+  (`search_hyperparams()` / `save_best_hyperparams()` /
+  `load_best_hyperparams()` currently have no callers; `train` uses
+  `DEFAULT_PARAMS`). The GBM-rebuild investigation (#23) found
+  hyperparameter tuning lands within noise on this feature set, so
+  wiring it in was deliberately skipped. Re-evaluate alongside the
+  feature-maturation milestone, not before.
 - **Temporal early-stopping split** (`train_model()`): when `_date` is
   present in X, uses a two-stage approach — fit a temporary model on the
   first 85% chronologically to find `n_iter_`, then retrain on all data
@@ -591,14 +603,17 @@ scoring it on the same slice it was fit on always looks near-perfect.
 On honest **out-of-fold** data the calibrated GBM's ECE is ~0.032 and
 Elo's is ~0.058 (now what `train` prints). The fix lives in §6.11.
 
-⚠ **Per-fold isotonic on small slices over-extremizes.** The final
+✅ **Per-fold calibration is sigmoid (fixed 2026-06).** The final
 full-slice isotonic is fine, but the *per-fold* calibration inside
-`walk_forward_validate` fits isotonic on ~250-game slices, which pushes
-some probabilities to 0/1 and actually **loses** to sigmoid out-of-fold
-(per-fold OOF: isotonic acc 62.2% / ll 0.669 vs sigmoid 64.7% / 0.631).
-This only affects the OOF arrays that feed the meta-learner; production's
-final calibration is unaffected. Revisit if the meta-learner is ever
-wired into `predict`.
+`walk_forward_validate` used to fit isotonic on ~250-game slices, which
+pushes some probabilities to 0/1 and **loses** to sigmoid out-of-fold
+(2026-06 measurement: isotonic acc 63.4% / ll 0.773 vs sigmoid 64.7% /
+0.629). Those corrupted OOF arrays fed both the ensemble-weight grid
+search (which consequently starved the GBM to w_elo≈0.90 — see §6.11)
+and the meta-learner. `walk_forward_validate(per_fold_calibration=
+"sigmoid")` is now the default; `tests/test_improvements.py::
+test_per_fold_calibration_defaults_to_sigmoid` pins it. The FINAL
+production calibration stays isotonic on the full ~770-game tail slice.
 
 Uses `CalibratedClassifierCV(cv="prefit")` wrapped in `FrozenEstimator`
 (required for sklearn ≥ 1.8, which removed direct prefit support).
@@ -625,11 +640,18 @@ favorite" signal.
 `sklearn.metrics.log_loss`, **on the walk-forward out-of-fold
 predictions** (not the isotonic calibration slice — see §6.11).
 Persisted to `trained_models/ensemble_weight.joblib` and reloaded at
-prediction time. Typical learned value: **~0.9 (Elo-leaning)** — on
-honest out-of-fold data the calibrated GBM is the *weaker* model
-(acc ~62-64% vs Elo's ~67% once Elo's home edge is calibrated, §6.10),
-so it earns only ~10% of the blend. It still helps marginally: the
-blend's Brier/log-loss beat pure Elo's.
+prediction time. Current learned value: **0.70 (still Elo-leaning)** —
+on honest out-of-fold data the calibrated GBM is the *weaker* model
+(acc ~64.7% vs Elo's ~66.8% once Elo's home edge is calibrated, §6.10),
+so it earns ~30% of the blend. An earlier learned value of ~0.9 was an
+artifact of scoring the weight grid against per-fold-*isotonic* OOF GBM
+probs (log-loss 0.773 from over-extremization — §5.3); with honest
+sigmoid OOF probs (ll 0.629) the GBM earns 0.30. The weight-table is
+nearly flat from w=0.5–0.9 (ll 0.6193–0.6188), so the blend quality is
+unchanged — but the larger GBM share matters structurally: the GBM is
+the only model that consumes the injury / line-movement /
+player-availability features, so its share is the conduit through which
+the maturing live-data features reach production predictions.
 
 > **Can the GBM be made to pull more weight?** Investigated thoroughly
 > (issue #23): regularization (shallower/fewer trees, higher `l2`,
@@ -1006,10 +1028,19 @@ now picks **w_elo ≈ 0.90**. Measured on the OOF set:
 | new `w_elo = 0.90` (OOF pick) | **66.8%** | **0.2137** | **0.6166** |
 
 i.e. **+1.0pp accuracy and −0.029 log-loss in production**, on top of
-§6.10. The GBM isn't useless — at ~10% weight it still improves the
-blend's Brier/log-loss over pure Elo — it just shouldn't dominate. Never
+§6.10. The GBM isn't useless — it still improves the blend's
+Brier/log-loss over pure Elo — it just shouldn't dominate. Never
 score a calibrated model on its own calibration set; if you need a
 single honest held-out number, use the OOF predictions.
+
+**2026-06 follow-on:** the "OOF pick ≈ 0.90" above was itself partly an
+artifact — the OOF GBM probs it was scored against were per-fold
+*isotonic* calibrated, which over-extremizes on ~250-game fold slices
+(§5.3). With the per-fold calibration fixed to sigmoid, the honest OOF
+pick is **w_elo = 0.70**. Blend log-loss is flat across 0.5–0.9 (within
+0.001), so this is weight-allocation hygiene rather than a headline
+metric change — but it triples the GBM's (and therefore the live-data
+features') share of production predictions.
 
 ---
 
@@ -1076,21 +1107,23 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (89 tests across seven files).
+# 7. Full test suite (102 tests across eight files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 89 passed in < 5s.
-# test_new_features.py       — 16 tests (shrinkage, drivers, spreads, migration)
-# test_improvements.py       — 15 tests (rolling stats, Four Factors, Elo,
-#   portfolio optimizer exposure cap)
+# Expect: 102 passed in < 5s.
+# test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
+# test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
+#   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
+# test_snapshot_jsonl.py     — 15 tests (JSONL round-trip, idempotence,
+#   ESPN fallback, Polymarket date disambiguation)
 # test_tier_improvements.py  — 14 tests (off/def Elo, EWM, meta-learner,
 #   signal-dependent Kelly, portfolio Kelly, dedup, fuzzy matching, cache)
 # test_montecarlo.py         — 12 tests (empirical bootstrap, market-null,
 #   log-growth invariance, reproducibility, validation)
-# test_simulate_horizon.py   —  8 tests (data-driven horizon, density scaling)
-# test_snapshot_jsonl.py     — 14 tests (JSONL round-trip, idempotence,
-#   ESPN fallback, Polymarket date disambiguation)
-# test_playoff_sync_and_resolve.py — 10 tests (play-in/playoff sync,
+# test_playoff_sync_and_resolve.py — 11 tests (play-in/playoff sync,
 #   update_results matching, record_predictions ET-date filing)
+# test_simulate_horizon.py   —  8 tests (data-driven horizon, density scaling)
+# test_rest_features.py      —  4 tests (vectorized rest/b2b/window counts
+#   pinned against a frozen copy of the original O(n²) loop)
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -1426,6 +1459,35 @@ A full audit of the system's logic, calibration alignment, and hot paths:
   new flag lets callers that already computed Elos (e.g. the train
   pipeline before the first `build_feature_matrix` call) skip the
   expensive DB wipe-and-rebuild. Default `True` preserves existing behavior.
+
+### 10.1e Efficiency + OOF-calibration pass (2026-06)
+
+Review pass after both data streams reached `READY` tier:
+
+- **`add_rest_features` vectorized** (`features/rest_days.py`) — the
+  per-game rescan of all past dates was O(n²) per team (~1M pandas
+  Timedelta ops) and cost **5.7s of the 6.3s** total feature build, on
+  every `predict`, `train`, and `backtest`. Replaced with a per-team
+  date diff (rest/b2b) + `searchsorted` trailing-window counts:
+  **5.72s → 0.006s** (~950×); full `build_feature_matrix` 6.25s → 0.52s.
+  `tests/test_rest_features.py` pins equivalence against a frozen copy
+  of the original loop, and the resulting feature matrix was verified
+  byte-identical (hash-compared) pre/post change.
+- **Rolling Four Factors deduplicated** — builder (training),
+  `PredictionEngine._load` (inference), and `predict_path_eval` each
+  carried a copy of the same groupby/shift/rolling block; all three now
+  call `four_factors.add_rolling_four_factors()`. Copies of this exact
+  loop are how the predict paths drifted before (#29).
+- **`PredictionEngine.rolling_context()` shares the latest-stats index**
+  with `predict()` via `_idx_cache` (one groupby pass per slate instead
+  of two); the `latest` / `injury` cache keys are populated
+  independently so pre-filling one cannot skip the other.
+- **Per-fold OOF calibration switched to sigmoid** (§5.3) and the
+  ensemble weight re-learned on the honest arrays: **w_elo 0.90 → 0.70**
+  (§6.11 follow-on). Meta-learner refit on the clean OOF arrays.
+- **Doc correction** — §5.2 previously claimed per-fold hyperparameter
+  grid search was wired into `train`; `search_hyperparams()` exists but
+  has no callers (deliberate — tuning landed within noise in #23).
 
 ### 10.2 Remaining caveats
 

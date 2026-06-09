@@ -265,6 +265,22 @@ def test_walk_forward_includes_calibration_keys():
         assert "brier_score" in fold
 
 
+def test_per_fold_calibration_defaults_to_sigmoid():
+    """The per-fold/OOF calibration must default to sigmoid, NOT isotonic.
+
+    Isotonic on a ~250-game fold slice over-extremizes (pushes probabilities
+    to 0/1) and corrupts the OOF arrays that the ensemble-weight grid search
+    and meta-learner train on — measured OOF log-loss 0.773 (isotonic) vs
+    0.629 (sigmoid) on the 3-season history. The FINAL full-slice production
+    calibration stays isotonic. See ARCHITECTURE §5.3.
+    """
+    import inspect
+    from nba_betting.models.xgboost_model import walk_forward_validate
+
+    sig = inspect.signature(walk_forward_validate)
+    assert sig.parameters["per_fold_calibration"].default == "sigmoid"
+
+
 # ---------------------------------------------------------------------------
 # 7. Same-day bet correlation adjustment
 # ---------------------------------------------------------------------------
