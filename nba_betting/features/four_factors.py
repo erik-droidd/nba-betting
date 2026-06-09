@@ -28,6 +28,31 @@ def add_four_factors(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_rolling_four_factors(
+    df: pd.DataFrame,
+    windows: tuple[int, ...] = (5, 10, 20),
+) -> pd.DataFrame:
+    """Rolling-mean the four factor columns per team, shift(1), no leakage.
+
+    Single source of truth for the rolling step that must be IDENTICAL
+    between training (`builder.build_feature_matrix` step 4) and inference
+    (`PredictionEngine._load`) — the two previously carried copies of this
+    loop, which is exactly the kind of duplication that let the predict
+    paths drift before (#29). Sorts by (team_id, date, game_id) and uses
+    groupby().transform() for pandas' C-path rolling mean.
+    """
+    df = df.sort_values(["team_id", "date", "game_id"])
+    for col in ("efg_pct", "tov_pct", "orb_pct", "ft_rate"):
+        shifted = df.groupby("team_id", sort=False)[col].shift(1)
+        for window in windows:
+            mp = max(1, window // 2)
+            df[f"{col}_roll_{window}"] = (
+                shifted.groupby(df["team_id"], sort=False)
+                .transform(lambda s, w=window, m=mp: s.rolling(w, min_periods=m).mean())
+            )
+    return df
+
+
 def add_opponent_rebound_data(df: pd.DataFrame) -> pd.DataFrame:
     """Add opponent DREB to compute ORB%.
 
