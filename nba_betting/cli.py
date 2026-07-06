@@ -713,8 +713,13 @@ def predict_path_eval(split: str = "2025-07-01") -> None:
     t.add_column("Brier", justify="right"); t.add_column("LogLoss", justify="right")
     t.add_row("correct (include latest)", f"{r['correct']['accuracy']:.1%}",
               f"{r['correct']['brier']:.4f}", f"{r['correct']['log_loss']:.4f}")
-    t.add_row("lagged (live, current)", f"{r['lagged']['accuracy']:.1%}",
+    t.add_row("lagged (legacy rolling lookup)", f"{r['lagged']['accuracy']:.1%}",
               f"{r['lagged']['brier']:.4f}", f"{r['lagged']['log_loss']:.4f}")
+    if "fresh_rest" in r:
+        t.add_row("lagged + fresh rest (live, current)",
+                  f"{r['fresh_rest']['accuracy']:.1%}",
+                  f"{r['fresh_rest']['brier']:.4f}",
+                  f"{r['fresh_rest']['log_loss']:.4f}")
     console.print(t)
     d = r["delta"]
     console.print(
@@ -722,10 +727,28 @@ def predict_path_eval(split: str = "2025-07-01") -> None:
         f"brier={d['brier']:+.4f}  logloss={d['log_loss']:+.4f}  | "
         f"mean |Δprob| from the lag = {r['mean_abs_prob_change']:.4f}[/dim]"
     )
-    if d["brier"] >= -0.001 and d["log_loss"] >= -0.001:
-        console.print("[green]→ The one-game lag is within noise; no fix warranted.[/green]")
+    if "delta_fresh_rest" in r:
+        df_ = r["delta_fresh_rest"]
+        console.print(
+            f"[dim]delta (fresh rest − lagged): acc={df_['accuracy']:+.4f}  "
+            f"brier={df_['brier']:+.4f}  logloss={df_['log_loss']:+.4f}  "
+            f"(paired-Brier t={r.get('fresh_rest_vs_lagged_tstat', 0):+.2f})  | "
+            f"mean |Δprob| from stale rest = {r['mean_abs_prob_change_fresh_rest']:.4f}[/dim]"
+        )
+    # Verdict on the remaining candidate fix (include-latest rolling on top
+    # of the live fresh-rest path), gated on the paired-Brier t-stat rather
+    # than raw point deltas — those flip sign run-to-run at this sample size.
+    t_corr = r.get("correct_vs_live_tstat", 0.0)
+    if t_corr >= 2.0:
+        console.print(
+            f"[yellow]→ Include-latest rolling beats the live path "
+            f"(paired-Brier t={t_corr:+.2f} ≥ 2); worth implementing.[/yellow]"
+        )
     else:
-        console.print("[yellow]→ Include-latest improves the holdout; worth implementing the fix.[/yellow]")
+        console.print(
+            f"[green]→ Include-latest rolling vs live path is within noise "
+            f"(paired-Brier t={t_corr:+.2f} < 2); no fix warranted.[/green]"
+        )
 
 
 @app.command()

@@ -26,31 +26,33 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Tier 1.4 — Opponent-strength MOV dampening
+# MOV multiplier — FiveThirtyEight formula (Tier 1.4 sigmoid removed 2026-07;
+# it double-corrected opponent strength and halved the effective K — see
+# models/elo.py module docstring for the replay evidence)
 # ---------------------------------------------------------------------------
 
 
-def test_opp_strength_factor_sigmoid_shape():
-    """Dampener is ~0.5 at parity, <0.5 vs weak, >0.5 vs strong."""
-    from nba_betting.models.elo import opp_strength_factor
-
-    # Parity: ~0.5
-    assert abs(opp_strength_factor(1500, 1500) - 0.5) < 1e-9
-    # Big favorite: heavily damped toward 0
-    assert opp_strength_factor(1700, 1300) < 0.2
-    # Big underdog: amplified toward 1
-    assert opp_strength_factor(1300, 1700) > 0.8
-
-
 def test_mov_multiplier_vs_weak_opponent_is_smaller():
-    """Same MOV against a weaker team should update Elo less."""
+    """Same MOV against a weaker team should update Elo less.
+
+    The 538 base formula's ``elo_winner - elo_loser`` denominator provides
+    this discount on its own — no extra opponent-strength factor needed.
+    """
     from nba_betting.models.elo import mov_multiplier
 
     strong_vs_weak = mov_multiplier(20, 1700, 1300)
     peer = mov_multiplier(20, 1500, 1500)
-    # Strong-team blowout against tanker is less informative than a
-    # same-MOV result between peers.
     assert strong_vs_weak < peer
+
+
+def test_mov_multiplier_is_538_scale_at_parity():
+    """At parity the multiplier must be the raw 538 value (~1.04 for a
+    10-point win), NOT halved — the removed sigmoid multiplied by 0.5 at
+    parity, silently running the system at K≈10 instead of K=20."""
+    from nba_betting.models.elo import mov_multiplier
+
+    expected = ((10 + 3) ** 0.8) / 7.5
+    assert abs(mov_multiplier(10, 1500, 1500) - expected) < 1e-12
 
 
 # ---------------------------------------------------------------------------

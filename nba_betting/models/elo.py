@@ -10,19 +10,22 @@ Two layers:
    recomputed as `(off + def) / 2` so downstream code keeps seeing a
    coherent single number.
 
-Tier 1.4 — opponent-strength dampening: blowouts vs weaker opponents are
-dampened more than blowouts vs strong ones. The standard MOV multiplier
-formula has an autocorrelation term in the denominator (the
-``elo_winner - elo_loser`` term), but it does not penalize a 30-pt drubbing
-of the worst team relative to a 30-pt drubbing of the best. The new
-``opp_strength_factor`` does exactly that, scaling the MOV multiplier by
-``1 / (1 + exp(-(elo_loser - elo_winner) / 200))`` so dominating a weak
-team carries less rating weight than the same margin against a peer.
+The MOV multiplier is FiveThirtyEight's verbatim. An earlier "Tier 1.4"
+variant additionally scaled it by an opponent-strength sigmoid
+(``1 / (1 + exp(-(elo_loser - elo_winner) / 200))``, ≈0.5 at parity),
+intended to discount blowouts of weak teams. Removed 2026-07: the base
+formula's ``elo_winner - elo_loser`` denominator already applies exactly
+that autocorrelation discount, so the sigmoid double-corrected AND halved
+the effective K (20 → ~10) at parity. An in-memory replay over the full
+3-season history (eval on seasons 2-3, n=2630, HA ∈ {30,40,50}) showed
+removing it improves Brier 0.2149 → 0.2092 and log-loss 0.6198 → 0.6055
+(paired t ≈ +4.7, consistent in both eval seasons) — decisively outside
+noise. Recompute Elos (``sync``/``compute_all_elos``) and retrain after
+touching this formula.
 """
 from __future__ import annotations
 
 from datetime import date
-import math
 
 from sqlalchemy import select, func
 
@@ -41,30 +44,16 @@ def expected_score(elo_a: float, elo_b: float) -> float:
     return 1.0 / (1.0 + 10.0 ** (-(elo_a - elo_b) / 400.0))
 
 
-def opp_strength_factor(elo_winner: float, elo_loser: float) -> float:
-    """Sigmoid weight that dampens MOV when winner is much stronger.
-
-    Returns a value in roughly (0, 1):
-    - winner == loser → 0.5
-    - winner >> loser → approaches 0 (blowout vs weak team is discounted)
-    - winner << loser → approaches 1 (upset blowout is amplified)
-
-    The 200-point scale was chosen to roughly match a half-effect at a
-    200-Elo gap (≈ ~3 pts in expected MOV by 538 calibration).
-    """
-    return 1.0 / (1.0 + math.exp(-(elo_loser - elo_winner) / 200.0))
-
-
 def mov_multiplier(mov: int, elo_winner: float, elo_loser: float) -> float:
     """Margin-of-victory multiplier with autocorrelation correction.
 
-    Tier 1.4 — multiplied by ``opp_strength_factor`` so blowouts against
-    weaker teams update Elo less than blowouts against peers. The base
-    formula is FiveThirtyEight's, retained verbatim; only the
-    opponent-strength scaling is new.
+    FiveThirtyEight's formula verbatim. The ``elo_winner - elo_loser``
+    denominator IS the opponent-strength correction: a favorite's blowout
+    gets a smaller multiplier than the same margin between peers. Do not
+    re-add a second opponent-strength factor on top — see the module
+    docstring for the measured cost of the removed Tier 1.4 sigmoid.
     """
-    base = ((abs(mov) + 3) ** 0.8) / (7.5 + 0.006 * (elo_winner - elo_loser))
-    return base * opp_strength_factor(elo_winner, elo_loser)
+    return ((abs(mov) + 3) ** 0.8) / (7.5 + 0.006 * (elo_winner - elo_loser))
 
 
 def update_elo(
@@ -127,8 +116,7 @@ def update_off_def_elo(
 
     # Reuse the aggregate MOV multiplier on the *overall* result so that
     # upsets and blowouts shift off/def Elo proportionally to how much
-    # they shifted aggregate Elo. The multiplier already includes Tier 1.4
-    # opp-strength dampening.
+    # they shifted aggregate Elo.
     if home_score > away_score:
         mult = mov_multiplier(abs(home_score - away_score), (home_off + home_def) / 2, (away_off + away_def) / 2)
     else:
