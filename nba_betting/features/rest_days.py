@@ -51,3 +51,52 @@ def add_rest_features(df: pd.DataFrame) -> pd.DataFrame:
     df["games_last_14"] = games_14
 
     return df
+
+
+def rest_features_for_upcoming(team_dates, game_date) -> dict[str, int]:
+    """Schedule-correct rest features for an UPCOMING game.
+
+    ``add_rest_features`` computes each historical game's rest profile from
+    the actual schedule — so a training row's ``rest_days`` describes the
+    game being predicted. The live predict path used to reuse the team's
+    *last completed game's* rest values instead (a one-game-stale profile:
+    a team that played last night showed the rest it had *before* that
+    game). Unlike the rolling-stat lag — evaluated and pinned as noise in
+    ``predict_path_eval`` — rest for the upcoming game is deterministic
+    and knowable exactly, so there is no de-noising argument for the lag.
+
+    Mirrors ``add_rest_features`` semantics exactly (pinned by
+    tests/test_rest_features.py::test_upcoming_matches_add_rest_features):
+    rest capped at 7, default 3 with no history, b2b = rest <= 1, trailing
+    windows inclusive of the exact 7/14-day boundary.
+
+    Args:
+        team_dates: The team's completed-game dates (any datetime-like);
+            need not be sorted.
+        game_date: The upcoming game's (ET) calendar date.
+
+    Returns:
+        ``{"rest_days", "is_back_to_back", "games_last_7", "games_last_14"}``.
+    """
+    import pandas as pd
+
+    game_ts = pd.Timestamp(game_date).normalize()
+    dates = pd.to_datetime(pd.Series(list(team_dates))).dt.normalize()
+    dates = dates[dates < game_ts].sort_values().to_numpy()
+
+    if len(dates) == 0:
+        return {"rest_days": 3, "is_back_to_back": 0,
+                "games_last_7": 0, "games_last_14": 0}
+
+    delta = int((game_ts.to_datetime64() - dates[-1]) / np.timedelta64(1, "D"))
+    rest = min(delta, 7)
+    g7 = int(len(dates) - np.searchsorted(
+        dates, game_ts.to_datetime64() - np.timedelta64(7, "D"), side="left"))
+    g14 = int(len(dates) - np.searchsorted(
+        dates, game_ts.to_datetime64() - np.timedelta64(14, "D"), side="left"))
+    return {
+        "rest_days": rest,
+        "is_back_to_back": int(rest <= 1),
+        "games_last_7": g7,
+        "games_last_14": g14,
+    }

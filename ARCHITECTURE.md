@@ -383,18 +383,31 @@ uninterpretable 70%+ accuracy that collapses on live data.
 > `build_prediction_features` reads each team's *latest stored row*
 > (`_get_latest_stats` → `iloc[-1]`), whose rolling value is the `shift(1)`
 > window — i.e. it **excludes that team's most recent completed game**. It
-> *looks* like a bug (a team's `net_rtg_game_roll_5` reads 16.8 at predict
-> when the last-5-including-latest mean is 21.4 — 27% off at `w=5`), and the
-> lag does move predictions ~7.6pp on average. **But it does not hurt
-> accuracy.** The `predict-path-eval` harness
+> *looks* like a bug, and the lag does move predictions ~7.7pp on average.
+> **But it does not hurt accuracy.** The `predict-path-eval` harness
 > (`betting/predict_path_eval.py`, `nba-betting predict-path-eval`) replays
-> ~1.3k held-out games through the real predict path and A/Bs lagged vs
-> include-latest: correct − lagged = **acc −0.7pp, Brier +0.001, log-loss
-> ≈0** — within noise and slightly *favorable* to the lag (the most recent
-> single game is noisy; excluding it de-noises the rolling estimate). So the
+> 1,315 held-out games through the real predict path and A/Bs the arms with
+> a paired-Brier t-test: include-latest vs the live path = **t ≈ +1.0,
+> within noise** (2026-07 re-run post Elo recompute; the point delta flipped
+> sign across Elo variants, which is what noise looks like). The most recent
+> single game is noisy; excluding it de-noises the rolling estimate. So the
 > lag is left as-is. **Do not "fix" it without re-running the harness** — it
 > is the only tool that scores the *prediction* path end to end (the WF
 > validation in `train` only scores the *training* path).
+>
+> **Predict-time rest staleness — this one WAS a bug, fixed 2026-07.** The
+> same latest-row lookup also reused the last completed game's
+> `rest_days` / `is_back_to_back` / `games_last_7/14` for the *upcoming*
+> game — a team that played last night did not read as on a back-to-back
+> tonight. Unlike the rolling lag, rest for the upcoming game is
+> deterministic from the schedule (no de-noising argument), and the
+> harness's isolated `fresh_rest` arm confirms the fix helps: acc +0.9pp,
+> Brier −0.0031 (paired t = +1.7), mean 3.5pp prediction shift.
+> `PredictionEngine.predict` now injects schedule-correct rest via
+> `rest_days.rest_features_for_upcoming` (equivalence with
+> `add_rest_features` is pinned in tests/test_rest_features.py); the
+> `rest_diff` override is included because `build_prediction_features`
+> derives it before merging `extra_features`.
 
 ### 4.3 Four Factors + rest + opponent rebound context
 
@@ -536,10 +549,15 @@ ESPN sync + lineup bump adjustments.
   recomputes both the ratings and the predictions at each value bottoms
   out at ~40 on Brier, log-loss, **and** accuracy simultaneously, and
   makes the mean Elo prediction match the empirical base rate. See §6.10.
-- MOV multiplier dampened by an **opponent-strength sigmoid**:
-  `opp_factor = 1 / (1 + exp(-(elo_loser - elo_winner) / 200))`. A 30-point
-  blowout over a weak opponent inflates ratings less than the same margin
-  over a contender.
+- MOV multiplier is **FiveThirtyEight's verbatim** — the
+  `elo_winner - elo_loser` denominator already discounts a favorite's
+  blowouts. The former Tier 1.4 opponent-strength sigmoid
+  (`1 / (1 + exp(-(elo_loser - elo_winner) / 200))`) was **removed 2026-07**:
+  it double-corrected opponent strength AND multiplied every update by
+  ~0.5 at parity, silently running the system at K≈10. Full-history replay
+  (eval on seasons 2–3, n=2630): removing it improves Elo Brier
+  0.2149 → 0.2092, log-loss 0.6198 → 0.6055, ECE 0.0579 → 0.0143
+  (paired t ≈ +4.7, consistent per-season). HA=40 re-validated as optimal.
 - Season carryover `ELO_CARRYOVER = 0.75` applied at the season boundary
   (`compute_all_elos()` detects season changes).
 - `get_current_elos()` reads the latest `EloRating` per team.
@@ -640,10 +658,14 @@ favorite" signal.
 `sklearn.metrics.log_loss`, **on the walk-forward out-of-fold
 predictions** (not the isotonic calibration slice — see §6.11).
 Persisted to `trained_models/ensemble_weight.joblib` and reloaded at
-prediction time. Current learned value: **0.70 (still Elo-leaning)** —
-on honest out-of-fold data the calibrated GBM is the *weaker* model
-(acc ~64.7% vs Elo's ~66.8% once Elo's home edge is calibrated, §6.10),
-so it earns ~30% of the blend. An earlier learned value of ~0.9 was an
+prediction time (mtime-cached in-process — it's consulted on every
+ensemble prediction). Current learned value: **0.90 (Elo-dominant)** —
+after the 2026-07 MOV-dampening removal the Elo model improved to OOF
+Brier 0.2092 / ECE 0.0143 and earns most of the blend; w=0.9 still beats
+w=1.0 (OOF log-loss 0.6051 vs 0.6055), so the GBM remains a thin
+complement. The blended OOF log-loss improved 0.6182 → 0.6051 versus the
+pre-removal system on the same 2,630 games. (Pre-2026-07 value was 0.70;
+the §6.10 discussion below reflects the older system.) An earlier learned value of ~0.9 was an
 artifact of scoring the weight grid against per-fold-*isotonic* OOF GBM
 probs (log-loss 0.773 from over-extremization — §5.3); with honest
 sigmoid OOF probs (ll 0.629) the GBM earns 0.30. The weight-table is
@@ -1351,8 +1373,10 @@ Three tiers of improvements shipped after the hardening pass:
   and `elo_def_before/after` to `EloRating`, `current_elo_off/def` to
   `Team`. Exposes four matchup-aware diff features (see §4.8, §5.1).
 - **Opponent-strength MOV dampening** — `opp_strength_factor()` sigmoid
-  multiplied into the MOV multiplier so blowouts over weak opponents
-  inflate ratings less (see §5.1).
+  multiplied into the MOV multiplier. **REMOVED 2026-07**: the 538 base
+  formula already applies this discount, so the sigmoid double-corrected
+  and halved the effective K; removal measurably improved Elo quality
+  (see §5.1).
 
 **Tier 2 — Model architecture & bet sizing:**
 - **Per-fold hyperparameter grid search** — 8-combo grid inside each WF
@@ -1564,3 +1588,68 @@ log-odds blend.
 - After the next `train` run, `blend_predictions()` will automatically
   use the meta-learner (game-dependent Elo/GBM weights) instead of the
   static grid-searched scalar.
+
+### 10.1f Whole-solution review pass (2026-07)
+
+Full logic + methodology + efficiency review of the solution. Three
+substantive changes, each empirically gated; artifacts retrained.
+
+**Methodology:**
+
+- **Removed the Tier 1.4 opponent-strength MOV sigmoid** (`models/elo.py`).
+  The 538 base multiplier's `elo_winner - elo_loser` denominator already
+  discounts favorites' blowouts; the extra sigmoid double-corrected and —
+  at ~0.5 for even matchups — silently halved the effective K to ~10.
+  Full-history replay (eval seasons 2–3, n=2630, HA ∈ {30,40,50}): Elo
+  Brier 0.2149 → 0.2092, log-loss 0.6198 → 0.6055, ECE 0.0579 → 0.0143,
+  paired t ≈ +4.7, consistent per-season. HA=40 re-validated as optimal.
+  Elos recomputed, models retrained: blended OOF log-loss 0.6182 → 0.6051
+  on the same 2,630 games; learned ensemble weight moved 0.70 → 0.90
+  (w=0.9 beats w=1.0, so the GBM still contributes).
+- **Fixed predict-time rest staleness** (`prediction_service.py` +
+  `rest_days.rest_features_for_upcoming`). The live path reused the last
+  completed game's rest profile for the upcoming game (a team that played
+  last night didn't read as on a b2b). Rest is deterministic from the
+  schedule — no de-noising argument, unlike the rolling lag. Gated via a
+  new isolated `fresh_rest` arm in `predict_path_eval`: acc +0.9pp, Brier
+  −0.0031 (paired t +1.7), mean 3.5pp prediction shift. Equivalence with
+  `add_rest_features` pinned in tests.
+- **Re-pinned the rolling-lag verdict post-Elo-recompute** and made the
+  `predict-path-eval` verdict significance-gated (paired-Brier t ≥ 2
+  instead of raw point deltas, which flipped sign across Elo variants).
+  Include-latest rolling vs the live path: t ≈ +1.0 → still no fix.
+
+**Efficiency:**
+
+- `run_backtest` predicts each test fold in one batched `predict_proba`
+  call and no longer trains a full-fold model that calibration discards:
+  15.5s → 1.1s (~14×) with bit-identical results.
+- `load_ensemble_weight()` is mtime-cached (was a disk `joblib.load` per
+  ensemble prediction — once per game live, once per simulated bet in
+  backtests).
+
+**Correctness (minor):**
+
+- `walk_forward_validate` now forces `early_stopping=False` for
+  explicitly-passed params too — `search_hyperparams` candidates were
+  being scored with a random internal validation split, inconsistent with
+  the `params=None` path `train` uses.
+- `simulate_bankroll` empty-input guard uses `len()` (numpy arrays raise
+  on ambiguous truthiness).
+
+**Flagged, intentionally not changed:**
+
+- Meta-learner and hyperparameter search remain unwired (documented
+  decisions, §5.2/§5.4).
+- Injury impact is applied post-hoc in `generate_recommendations` AND
+  exists as a GBM feature; today the feature is ~0 for most training rows
+  so there's no real double-count, but as `historical_injuries` coverage
+  matures the model will learn the feature and the post-hoc adjustment
+  should be phased out — revisit at the readiness-status READY tier.
+- `PlayerStat.minutes/points/assists/rebounds_per_game` are never
+  populated by any sync (roster sync writes zeros), so the WAT
+  "available talent" features are inert: constant-0 in training means the
+  GBM cannot split on them, and live values have no effect. Needs a real
+  per-player stats source before the player-impact block can matter.
+- The API predict route reads `injuries.json` without syncing ESPN first
+  (CLI syncs); acceptable divergence while the API is for local use.

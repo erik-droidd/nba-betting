@@ -125,10 +125,13 @@ def walk_forward_validate(
     """
     if params is None:
         params = DEFAULT_PARAMS.copy()
-        # Disable early stopping for walk-forward (we have explicit train/test)
-        wf_params = {**params, "early_stopping": False}
-    else:
-        wf_params = params
+    # Disable early stopping for walk-forward regardless of caller params —
+    # we have an explicit temporal train/test split, and a random internal
+    # validation_fraction split would both waste training data and score
+    # grid-search candidates (which pass params explicitly, inheriting
+    # early_stopping=True from DEFAULT_PARAMS) under different rules than
+    # the params=None path used by `train`.
+    wf_params = {**params, "early_stopping": False}
 
     if "_date" not in X.columns:
         raise ValueError("X must contain _date column for temporal splitting")

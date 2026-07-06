@@ -137,12 +137,11 @@ def run_backtest(
         X_tr = X_sorted.loc[train_mask, feature_cols].values
         y_tr = y_sorted.loc[train_mask].values
 
-        model = HistGradientBoostingClassifier(**wf_params)
-        model.fit(X_tr, y_tr)
-
         # Apply isotonic calibration on the last 20% of the training fold
         # so that predict_proba on the test fold matches the calibrated
-        # probabilities used in the live predict pipeline.
+        # probabilities used in the live predict pipeline. The full-fold
+        # uncalibrated model is only trained if the calibration path
+        # can't run (tiny fold) or fails.
         calibrated_model = None
         n_train = len(X_tr)
         cal_start = int(n_train * 0.8)
@@ -150,7 +149,7 @@ def run_backtest(
         y_fit, y_cal = y_tr[:cal_start], y_tr[cal_start:]
         if len(X_cal) >= 20:
             try:
-                # Re-fit on the 80% slice so the calibrator sees out-of-sample
+                # Fit on the 80% slice so the calibrator sees out-of-sample
                 # predictions from the model trained on the same 80%.
                 fit_model = HistGradientBoostingClassifier(**wf_params)
                 fit_model.fit(X_fit, y_fit)
@@ -158,20 +157,31 @@ def run_backtest(
             except Exception:
                 calibrated_model = None
 
-        # Use calibrated model for test predictions; fall back to raw model.
-        predict_model = calibrated_model if calibrated_model is not None else model
+        if calibrated_model is not None:
+            predict_model = calibrated_model
+        else:
+            predict_model = HistGradientBoostingClassifier(**wf_params)
+            predict_model.fit(X_tr, y_tr)
+
+        # Predict the whole test fold in one batched call — one forward
+        # pass over N rows instead of N single-row predict_proba calls,
+        # whose per-call overhead dominated backtest runtime.
+        test_indices = X_sorted.index[test_mask]
+        gbm_probs = predict_model.predict_proba(
+            X_sorted.loc[test_mask, feature_cols].values
+        )[:, 1]
+        if "elo_home_prob" in X_sorted.columns:
+            elo_probs = X_sorted.loc[test_mask, "elo_home_prob"].astype(float).values
+        else:
+            elo_probs = np.full(len(test_indices), 0.5)
 
         # Simulate betting on each test game
-        test_indices = X_sorted.index[test_mask]
-        for idx in test_indices:
+        for pos, idx in enumerate(test_indices):
             row = X_sorted.loc[idx]
             actual = y_sorted.loc[idx]
 
-            feat_vals = row[feature_cols].values.reshape(1, -1)
-            gbm_prob = predict_model.predict_proba(feat_vals)[0, 1]
-
-            # Get Elo probability from features
-            elo_prob = row.get("elo_home_prob", 0.5)
+            gbm_prob = gbm_probs[pos]
+            elo_prob = elo_probs[pos]
 
             if use_ensemble:
                 raw_model_home = ensemble_predict(elo_prob, gbm_prob)

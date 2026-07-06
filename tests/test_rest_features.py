@@ -116,6 +116,63 @@ def test_first_game_defaults_and_b2b():
     _assert_matches_reference(df)
 
 
+def test_upcoming_matches_add_rest_features():
+    """rest_features_for_upcoming must reproduce add_rest_features exactly.
+
+    For every historical game, computing the upcoming-game rest profile
+    from only the team's PRIOR game dates must equal the values
+    add_rest_features assigned to that game's row — this is the invariant
+    that makes the live predict-path override train/predict-consistent.
+    """
+    from nba_betting.features.rest_days import rest_features_for_upcoming
+
+    rng = np.random.default_rng(11)
+    rows = []
+    for team in (1, 2):
+        day = pd.Timestamp("2025-10-20")
+        for _ in range(40):
+            day = day + pd.Timedelta(days=int(rng.integers(1, 9)))
+            rows.append((team, str(day.date())))
+    df = _schedule_df(rows)
+    got = add_rest_features(df)
+
+    for team_id, team_df in got.groupby("team_id"):
+        dates = team_df["date"].tolist()
+        for i in range(len(team_df)):
+            expected = team_df.iloc[i]
+            upcoming = rest_features_for_upcoming(dates[:i], dates[i])
+            for col in _REST_COLS:
+                assert upcoming[col] == expected[col], (
+                    f"team={team_id} game={i} col={col}: "
+                    f"{upcoming[col]} != {expected[col]}"
+                )
+
+
+def test_upcoming_no_history_defaults():
+    """No completed games → the same defaults training uses (rest 3, no b2b)."""
+    from nba_betting.features.rest_days import rest_features_for_upcoming
+
+    out = rest_features_for_upcoming([], "2026-01-15")
+    assert out == {
+        "rest_days": 3, "is_back_to_back": 0,
+        "games_last_7": 0, "games_last_14": 0,
+    }
+
+
+def test_upcoming_ignores_future_and_same_day_dates():
+    """Dates on/after the target game must not count as completed games."""
+    from nba_betting.features.rest_days import rest_features_for_upcoming
+
+    out = rest_features_for_upcoming(
+        ["2026-01-10", "2026-01-14", "2026-01-15", "2026-01-20"],
+        "2026-01-15",
+    )
+    assert out["rest_days"] == 1
+    assert out["is_back_to_back"] == 1
+    assert out["games_last_7"] == 2
+    assert out["games_last_14"] == 2
+
+
 def test_unsorted_input_and_extra_columns_preserved():
     """Input order must not matter, and non-schedule columns pass through."""
     df = _schedule_df([

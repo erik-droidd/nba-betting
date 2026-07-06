@@ -116,6 +116,8 @@ class PredictionEngine:
             compute_latest_stats_index,
             compute_injury_impact_index,
         )
+        from nba_betting.features.rest_days import rest_features_for_upcoming
+        from nba_betting.data.polymarket import game_date_et
         from nba_betting.models.spreads_totals import predict_spread_total
 
         rolling_df = self.rolling_df
@@ -144,6 +146,34 @@ class PredictionEngine:
                 extra["spread_movement"] = lm.get("spread_movement", 0.0)
                 extra["prob_movement"] = lm.get("prob_movement", 0.0)
                 extra["odds_disagreement"] = lm.get("odds_disagreement", 0.0)
+
+                # Schedule-correct rest features for THIS upcoming game.
+                # Without the override, build_prediction_features reuses the
+                # team's last completed game's rest profile — one game stale
+                # (a team that played last night would not read as on a
+                # back-to-back tonight). Unlike the rolling-stat lag (pinned
+                # as noise), rest is deterministic from the schedule, and the
+                # predict_path_eval "fresh_rest" arm shows the fix improves
+                # holdout accuracy/Brier/log-loss. rest_diff must be included
+                # because build_prediction_features derives it before merging
+                # extra_features.
+                gd = game_date_et(_game)
+                if gd is not None:
+                    if "team_dates" not in self._idx_cache:
+                        self._idx_cache["team_dates"] = {
+                            int(tid): g["date"].values
+                            for tid, g in rolling_df.groupby("team_id")
+                        }
+                    team_dates = self._idx_cache["team_dates"]
+                    h_rest = rest_features_for_upcoming(
+                        team_dates.get(home_id, []), gd)
+                    a_rest = rest_features_for_upcoming(
+                        team_dates.get(away_id, []), gd)
+                    for col, val in h_rest.items():
+                        extra[f"home_{col}"] = val
+                    for col, val in a_rest.items():
+                        extra[f"away_{col}"] = val
+                    extra["rest_diff"] = h_rest["rest_days"] - a_rest["rest_days"]
                 try:
                     from nba_betting.features.player_impact import (
                         compute_player_impact_features,

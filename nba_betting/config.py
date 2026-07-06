@@ -41,7 +41,10 @@ ELO_K_FACTOR = 20.0
 #   HA=100 -> mean_pred 0.634, Brier 0.2252, logloss 0.6403, acc 62.0%
 #   HA=40  -> mean_pred 0.554, Brier 0.2174, logloss 0.6251, acc 66.2%
 # 40 is the joint optimum on Brier, log-loss, and accuracy, and makes the
-# mean Elo prediction match the empirical base rate. Used in BOTH the Elo
+# mean Elo prediction match the empirical base rate. Re-validated 2026-07
+# after removing the Tier 1.4 MOV dampening sigmoid (see models/elo.py):
+# with the pure 538 multiplier, HA ∈ {30,40,50} gives Brier
+# {0.2095, 0.2092, 0.2093} — 40 remains the optimum. Used in BOTH the Elo
 # update and the prediction, plus the `elo_home_prob` feature in builder.py
 # — recompute Elos (`sync`/compute_all_elos) and retrain after changing it.
 ELO_HOME_ADVANTAGE = 40.0

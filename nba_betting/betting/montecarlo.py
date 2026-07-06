@@ -90,7 +90,8 @@ def simulate_bankroll(
         ValueError: if ``mode="empirical"`` and ``won_outcomes`` is
             missing, or if input arrays have mismatched lengths.
     """
-    if not model_probs or not market_probs:
+    # len() instead of truthiness: numpy arrays raise on ambiguous bool().
+    if model_probs is None or market_probs is None or len(model_probs) == 0 or len(market_probs) == 0:
         return {"error": "No bet data provided", "mode": mode}
 
     model_arr = np.asarray(model_probs, dtype=float)

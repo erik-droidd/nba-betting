@@ -100,14 +100,32 @@ def save_ensemble_weight(weight: float) -> Path:
     return ENSEMBLE_WEIGHT_PATH
 
 
+# Tier 3.1-style mtime-keyed cache (see xgboost_model.load_model). The
+# weight is consulted on EVERY ensemble prediction — one per game on a
+# live slate, one per simulated game in a backtest — and re-reading a
+# joblib file from disk each time is pure overhead. Invalidates
+# automatically when `train` rewrites the artifact.
+_WEIGHT_CACHE: dict[str, object] = {}
+
+
 def load_ensemble_weight() -> float:
-    """Load the learned ensemble weight, falling back to DEFAULT_ELO_WEIGHT."""
-    if not ENSEMBLE_WEIGHT_PATH.exists():
-        return DEFAULT_ELO_WEIGHT
+    """Load the learned ensemble weight, falling back to DEFAULT_ELO_WEIGHT.
+
+    Cached in-process, keyed by the artifact's mtime.
+    """
     try:
-        return float(joblib.load(ENSEMBLE_WEIGHT_PATH))
+        mtime = ENSEMBLE_WEIGHT_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return DEFAULT_ELO_WEIGHT
+    if _WEIGHT_CACHE.get("key") == mtime:
+        return _WEIGHT_CACHE["value"]  # type: ignore[return-value]
+    try:
+        weight = float(joblib.load(ENSEMBLE_WEIGHT_PATH))
     except Exception:
         return DEFAULT_ELO_WEIGHT
+    _WEIGHT_CACHE["value"] = weight
+    _WEIGHT_CACHE["key"] = mtime
+    return weight
 
 
 def blend_predictions(
