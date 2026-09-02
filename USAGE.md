@@ -19,10 +19,10 @@ pip install -e .
 
 ### 2. Load Historical Data
 
-Fetch 3 seasons of NBA game data from NBA.com and compute Elo ratings. This takes several minutes due to API rate limiting (1.5s per call).
+Fetch 5 seasons of NBA game data from NBA.com and compute Elo ratings (a few API calls per season, ~1 s each plus the 1.5 s rate-limit delay). The current season is derived from today's date (rolls over July 1), so this command keeps following the league from one season to the next without edits.
 
 ```bash
-python3 -m nba_betting sync --seasons 3
+python3 -m nba_betting sync --seasons 5
 ```
 
 This will:
@@ -39,7 +39,7 @@ python3 -m nba_betting train
 
 This will:
 - Build a feature matrix (~98 features: rolling stats, Four Factors, **SOS-adjusted net rating**, **pace/possessions**, **EWM-weighted stats**, **off/def Elo split**, Pythagorean expectation, rest days, Elo, **player availability** (WAT score, missing-minutes %, star-out flag), injury impact, line movement)
-- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries — **with per-fold hyperparameter grid search** (max_depth, learning_rate, max_iter, regularization); best params saved to `trained_models/best_params.joblib`. Uses a two-stage **temporal early-stopping split**: fit a temporary model on the first 85% of training data to find the optimal iteration count, then retrain on all data with that fixed count (avoids leaking future games into the early-stopping validation set)
+- Run walk-forward validation (trains on older data, tests on newer) with July 1 season boundaries, using deliberately **heavily regularized GBM defaults** (depth 3, learning rate 0.02, 200 rounds, 100-sample leaves, L2 10 — the earlier defaults overfit at this sample size; see ARCHITECTURE §5.2). Uses a two-stage **temporal early-stopping split**: fit a temporary model on the first 85% of training data to find the optimal iteration count, then retrain on all data with that fixed count (avoids leaking future games into the early-stopping validation set)
 - Report accuracy, Brier score, log loss, and calibrated ECE per fold
 - Train the final model on all data
 - **Calibrate probabilities via isotonic regression** (replaces Platt sigmoid, which over-compressed tails on the ~54% home-win base rate)
@@ -47,7 +47,7 @@ This will:
 - **Fit a stacked logistic meta-learner** on the walk-forward out-of-fold predictions [elo_logit, gbm_logit, |disagreement|] and save it to `trained_models/ensemble_meta.joblib` (requires ≥ 200 OOF games; falls back to the log-odds blend otherwise). The meta-learner learns game-dependent Elo/GBM weights instead of the static grid-searched scalar.
 - Save all model artifacts to `trained_models/`
 
-**Expected output**: ~63-65% walk-forward accuracy on the GBM-only table, Brier score ~0.22-0.24, calibrated ECE ~0.00-0.02. (The blended ensemble that `predict` actually uses scores higher — ~66-67% on the same out-of-fold games — because the Elo component is calibrated to the modern home-court edge; the single GBM table understates it since its top feature `elo_diff` cancels the home bonus.)
+**Expected output** (5 seasons synced, 3 walk-forward folds): ~66% walk-forward accuracy on the GBM-only table, Brier ~0.213, log-loss ~0.615; the "Elo (out-of-fold)" line should read Brier ~0.210 with ECE below 0.01, and the learned Elo weight 0.7-0.9. The blended ensemble that `predict` uses is within noise of the Elo model alone — on box-score features the Elo rating (with its home-court and back-to-back adjustments) already captures the available signal; the GBM's share is mainly the conduit for the live injury / line-movement features (ARCHITECTURE §5.4).
 
 ### 4. Sync Player Rosters (Optional, Improves Predictions)
 
@@ -474,8 +474,8 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 
 | When | Command | Why |
 |------|---------|-----|
-| First time | `sync --seasons 3` then `train` | Load data and build model |
-| Start of season | `sync --seasons 3` then `train` | Retrain with fresh data |
+| First time | `sync --seasons 5` then `train` | Load data and build model |
+| Start of season | `sync --seasons 5` then `train` | Retrain with fresh data (the season string is derived from the date — nothing to edit) |
 | Daily (morning) | `sync` | Get yesterday's results, update Elo |
 | Before games | `predict` | Get today's recommendations |
 | Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron (or GitHub Actions — see §Step 2b) |
@@ -529,7 +529,7 @@ trained_models/
 
 ```bash
 # Data & model
-python3 -m nba_betting sync --seasons 3         # Fetch game data + compute Elo
+python3 -m nba_betting sync --seasons 5         # Fetch game data + compute Elo
 python3 -m nba_betting train                     # Train GBM model + calibrate
 python3 -m nba_betting sync-players              # Sync player rosters from ESPN
 

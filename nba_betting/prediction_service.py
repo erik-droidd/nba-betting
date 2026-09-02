@@ -133,6 +133,10 @@ class PredictionEngine:
             self._idx_cache["injury"] = compute_injury_impact_index()
 
         extra: dict = {}
+        # Schedule-correct rest for the upcoming game (None when unknown);
+        # feeds the Elo b2b adjustment in every Elo call below.
+        h_rest_days = None
+        a_rest_days = None
         if home_id and away_id:
             _game = next(
                 (g for g in self.games
@@ -174,6 +178,8 @@ class PredictionEngine:
                     for col, val in a_rest.items():
                         extra[f"away_{col}"] = val
                     extra["rest_diff"] = h_rest["rest_days"] - a_rest["rest_days"]
+                    h_rest_days = h_rest["rest_days"]
+                    a_rest_days = a_rest["rest_days"]
                 try:
                     from nba_betting.features.player_impact import (
                         compute_player_impact_features,
@@ -200,7 +206,7 @@ class PredictionEngine:
             injury_impacts=self._idx_cache.get("injury"),
         )
         if feat_row is None:
-            return predict_home_win_prob(home_elo, away_elo)
+            return predict_home_win_prob(home_elo, away_elo, h_rest_days, a_rest_days)
 
         for col in self.feature_cols:
             if col not in feat_row.columns:
@@ -220,5 +226,6 @@ class PredictionEngine:
                     pass
 
         if self.blend:
-            return ensemble_predict(predict_home_win_prob(home_elo, away_elo), xgb_prob)
+            elo_prob = predict_home_win_prob(home_elo, away_elo, h_rest_days, a_rest_days)
+            return ensemble_predict(elo_prob, xgb_prob)
         return xgb_prob

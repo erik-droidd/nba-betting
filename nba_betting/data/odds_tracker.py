@@ -70,6 +70,29 @@ def _is_duplicate(
     )
 
 
+def snapshot_game_date(game: dict, fallback: date) -> date:
+    """ET calendar date to key a game's odds snapshots / line-movement
+    lookups on. Prefers an explicit ``game_date`` on the game dict, then the
+    ET date of ``game_time_utc``, then ``fallback`` (normally ``today_et()``).
+    Single source of truth shared by `snapshot_current_odds` and the
+    predict-time line-movement lookups in the CLI / API."""
+    explicit = game.get("game_date")
+    if explicit is not None:
+        if isinstance(explicit, date):
+            return explicit
+        try:
+            return date.fromisoformat(str(explicit)[:10])
+        except ValueError:
+            pass
+    et = game_date_et(game)
+    if et:
+        try:
+            return date.fromisoformat(et)
+        except ValueError:
+            pass
+    return fallback
+
+
 def snapshot_current_odds(
     games: list[dict],
     polymarket_odds: list[dict],
@@ -125,21 +148,13 @@ def snapshot_current_odds(
             # (date, home_id, away_id) tuple still uniquely identifies it
             # within a day.
             game_id = game.get("game_id")
-            # game_time_utc is an ISO 8601 string ("2026-04-14T23:00:00Z");
-            # parsing the date prefix lets us correctly file future-day
-            # snapshots (when `fetch_upcoming_games` returns games past
-            # midnight UTC) under the actual game date, so `get_closing_line`
-            # joins by (game_date, home_id, away_id) work.
-            game_date_val = game.get("game_date")
-            if game_date_val is None:
-                gtu = (game.get("game_time_utc") or "")[:10]
-                if len(gtu) == 10 and gtu[4] == "-" and gtu[7] == "-":
-                    try:
-                        game_date_val = date.fromisoformat(gtu)
-                    except ValueError:
-                        game_date_val = today
-                else:
-                    game_date_val = today
+            # File the snapshot under the game's ET calendar date — the same
+            # convention as `Game.date`, `get_closing_line`, the tracker's
+            # per-game `game_date`, and the JSONL importer's re-resolution.
+            # The previous UTC-prefix (`game_time_utc[:10]`) filing put every
+            # late tip-off (>= 8 PM ET) on the *next* day, so closing-line /
+            # CLV joins silently missed those games.
+            game_date_val = snapshot_game_date(game, today)
 
             key = frozenset([home_abbr, away_abbr])
             poly = match_odds_for_game(poly_index, key, game_date_et(game))

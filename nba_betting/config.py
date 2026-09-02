@@ -49,6 +49,17 @@ ELO_K_FACTOR = 20.0
 # — recompute Elos (`sync`/compute_all_elos) and retrain after changing it.
 ELO_HOME_ADVANTAGE = 40.0
 ELO_CARRYOVER = 0.75
+# Back-to-back penalty in Elo points. A team playing the second night of a
+# back-to-back (rest_days <= 1) is docked this many points in BOTH the
+# prediction and the rating update (so the rating itself never absorbs a
+# schedule effect). 25 points is ~3.6pp at parity, matching the well-known
+# NBA second-night effect. Chosen 2026-09 by a full-history replay on 5
+# seasons (eval 2022-23..2025-26, n=5268): Brier 0.2152 -> 0.2144,
+# log-loss 0.6188 -> 0.6169, paired t = +4.1, improvement in 3 of 4 eval
+# seasons and never negative. The same sweep re-confirmed K=20 / HA=40 as
+# optimal, carryover flat across 0.6-0.8, and a linear rest-days term adds
+# nothing beyond the b2b flag. Recompute Elos and retrain after changing.
+ELO_B2B_PENALTY = 25.0
 
 # NBA API rate limiting. Tier 3.3 — 1.5s is the empirically observed
 # "safe" floor for stats.nba.com without triggering 429s during backfill
@@ -68,8 +79,26 @@ ESPN_API_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
 # + injury sync under 2 minutes for the full league.
 ESPN_API_DELAY_SECONDS = 0.8
 
-# Current NBA season
-CURRENT_SEASON = "2025-26"
+# Current NBA season, derived from the calendar so `sync` keeps following
+# the league without a manual edit each autumn (a hardcoded "2025-26" would
+# have silently synced nothing once the 2026-27 season tipped off). The
+# season year rolls over on July 1 — the same boundary the walk-forward
+# splits use — so the off-season already points at the upcoming season
+# (whose game log is simply empty until opening night).
+
+
+def season_for_date(d) -> str:
+    """NBA season string ("2026-27") containing calendar date ``d``."""
+    start = d.year if d.month >= 7 else d.year - 1
+    return f"{start}-{str(start + 1)[-2:]}"
+
+
+def _current_season() -> str:
+    from datetime import date as _date
+    return season_for_date(_date.today())
+
+
+CURRENT_SEASON = _current_season()
 
 # NBA team abbreviation mapping (Polymarket name -> NBA.com abbreviation)
 TEAM_NAME_TO_ABBR = {

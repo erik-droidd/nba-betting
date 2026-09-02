@@ -131,34 +131,26 @@ def predict(
     except Exception:
         pass  # Non-critical
 
-    # Get line movement data. Snapshots are filed under each game's UTC
-    # date (parsed from `game_time_utc[:10]` in `snapshot_current_odds`),
-    # so query with the same key per game. Falling back to today_et()
-    # only when the game record is missing a parseable timestamp.
+    # Get line movement data. Snapshots are filed under each game's ET
+    # date (`snapshot_game_date`, the same key as Game.date / the closing
+    # line lookups), so query with that key per game.
     line_movements = {}
     try:
-        from nba_betting.data.odds_tracker import get_line_movement
+        from nba_betting.data.odds_tracker import get_line_movement, snapshot_game_date
         from nba_betting.data.nba_stats import today_et
         from nba_betting.db.models import Team
         from nba_betting.db.session import get_session
         from sqlalchemy import select
-        from datetime import date as date_type
         session = get_session()
         team_lookup = {t.abbreviation: t.id for t in session.execute(select(Team)).scalars().all()}
         session.close()
+        _today = today_et()
         for g in games:
             h_id = team_lookup.get(g["home_team_abbr"])
             a_id = team_lookup.get(g["away_team_abbr"])
             if not (h_id and a_id):
                 continue
-            gtu = (g.get("game_time_utc") or "")[:10]
-            game_date = today_et()
-            if len(gtu) == 10 and gtu[4] == "-" and gtu[7] == "-":
-                try:
-                    game_date = date_type.fromisoformat(gtu)
-                except ValueError:
-                    pass
-            lm = get_line_movement(game_date, h_id, a_id)
+            lm = get_line_movement(snapshot_game_date(g, _today), h_id, a_id)
             if lm.get("n_snapshots", 0) > 0:
                 line_movements[(g["home_team_abbr"], g["away_team_abbr"])] = lm
     except Exception:
@@ -415,6 +407,20 @@ def sync(
     console.print("[dim]Computing Elo ratings...[/dim]")
     elos = compute_all_elos()
     console.print(f"[green]Elo ratings computed for {len(elos)} teams.[/green]")
+
+    # Odds snapshots are captured before their game exists in the games
+    # table, so the importer can't attach a game_id at import time. Now
+    # that new games are stored, attach them (and the game's ET date) so
+    # closing-line / CLV / real-odds-backtest joins find them.
+    try:
+        from nba_betting.data.snapshot_jsonl import reresolve_existing_snapshots
+        res = reresolve_existing_snapshots(only_unmatched=True)
+        if res.get("updated"):
+            console.print(
+                f"[green]Attached {res['updated']} odds snapshot(s) to newly synced games.[/green]"
+            )
+    except Exception as e:
+        console.print(f"[yellow]Snapshot re-resolution skipped: {e}[/yellow]")
 
     # Auto-resolve pending predictions
     from nba_betting.betting.tracker import update_results
