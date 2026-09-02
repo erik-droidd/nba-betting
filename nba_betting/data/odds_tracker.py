@@ -493,3 +493,31 @@ def get_line_movement(
         }
     finally:
         session.close()
+
+
+def batch_closing_lines() -> dict[tuple, dict]:
+    """One-shot load of the LATEST snapshot per (game_date, home_id,
+    away_id, source): ``{(date, home, away, source): {home_prob, spread,
+    over_under, timestamp}}``. Used by the market-eval harness instead of
+    N ``get_closing_line`` round-trips. Polymarket rows carry only
+    ``home_prob``; ESPN rows carry ``spread`` / ``over_under`` too.
+    """
+    session = get_session()
+    try:
+        rows = session.execute(
+            select(OddsSnapshot).order_by(OddsSnapshot.timestamp)
+        ).scalars().all()
+    finally:
+        session.close()
+    out: dict[tuple, dict] = {}
+    for s in rows:
+        if s.game_date is None or s.home_team_id is None or s.away_team_id is None:
+            continue
+        key = (s.game_date, int(s.home_team_id), int(s.away_team_id), s.source)
+        out[key] = {           # rows are timestamp-ordered, so the last write is the close
+            "home_prob": s.home_prob,
+            "spread": s.spread,
+            "over_under": s.over_under,
+            "timestamp": s.timestamp,
+        }
+    return out

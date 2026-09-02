@@ -708,6 +708,79 @@ def clv(limit: int = 20) -> None:
         console.print(summary)
 
 
+@app.command(name="market-eval")
+def market_eval(
+    n_splits: int = typer.Option(3, help="Walk-forward folds (July-1 season splits)."),
+    min_games: int = typer.Option(300, help="Games with a closing line needed before a verdict is issued."),
+) -> None:
+    """Score the model against REAL closing lines (odds_snapshots).
+
+    Walk-forward out-of-fold model probabilities / margins / totals are
+    joined to the latest pre-game snapshot per game and compared with the
+    market on the same games: moneyline Brier/log-loss (+ the market-
+    shrinkage weight that minimises log-loss), spread MAE + cover rate of
+    the model's picks, total MAE + hit rate. Every section reports n; the
+    verdict is significance-gated and withheld below --min-games. This is
+    the harness that will eventually set MARKET_SHRINKAGE_LAMBDA and decide
+    whether spread/total picks deserve a stake — run it as the snapshot
+    cron accumulates a season of lines.
+    """
+    from rich.table import Table
+    from nba_betting.betting.market_eval import evaluate_against_market
+    from nba_betting.config import MARKET_SHRINKAGE_LAMBDA
+
+    console.print("[bold]Scoring walk-forward predictions against real closing lines...[/bold]")
+    res = evaluate_against_market(n_splits=n_splits)
+    ml, sp, tot = res["moneyline"], res["spread"], res["total"]
+
+    t = Table(title=f"Moneyline vs closing line (n={ml['n']})", show_header=True, header_style="bold cyan")
+    t.add_column("Series"); t.add_column("Brier", justify="right"); t.add_column("LogLoss", justify="right")
+    if ml["n"]:
+        t.add_row("model (OOF blend)", f"{ml['model_brier']:.4f}", f"{ml['model_ll']:.4f}")
+        t.add_row("market (closing)", f"{ml['market_brier']:.4f}", f"{ml['market_ll']:.4f}")
+        t.add_row(f"shrunk λ={MARKET_SHRINKAGE_LAMBDA:.2f} (live)", f"{ml['live_brier']:.4f}", f"{ml['live_ll']:.4f}")
+        t.add_row(f"shrunk λ={ml['best_lambda']:.2f} (best)", f"{ml['best_brier']:.4f}", f"{ml['best_ll']:.4f}")
+    console.print(t)
+    if ml["n"]:
+        console.print(
+            f"  market − model paired-Brier t = {ml['t_market_vs_model']:+.2f} "
+            f"(positive → market better); best λ vs live λ t = {ml['t_best_vs_live']:+.2f}"
+        )
+        console.print("  [dim]λ grid log-loss: " + "  ".join(f"{k:.1f}:{v:.4f}" for k, v in sorted(ml["lambda_table"].items())) + "[/dim]")
+
+    for name, sec, thr in (("Spread", sp, "±1.5 pts"), ("Total", tot, "±2.5 pts")):
+        t2 = Table(title=f"{name} vs closing line (n={sec['n']})", show_header=True, header_style="bold cyan")
+        t2.add_column("Series"); t2.add_column("MAE", justify="right")
+        if sec["n"]:
+            t2.add_row("model", f"{sec['model_mae']:.2f}")
+            t2.add_row("market", f"{sec['market_mae']:.2f}")
+            t2.add_row("avg(model, market)", f"{sec['avg_mae']:.2f}")
+        console.print(t2)
+        if sec["n"]:
+            console.print(
+                f"  market − model paired-|err| t = {sec['t_market_vs_model']:+.2f} (positive → market better); "
+                f"picks at {thr}: {sec['picks']} → {sec['hits']} hits ({sec['hit_rate']:.1%}), "
+                f"break-even 52.4%"
+            )
+
+    n = ml["n"]
+    if n < min_games:
+        console.print(
+            f"\n[yellow]Not yet informative: {n} games with a closing line "
+            f"(need ≥ {min_games}). Keep the snapshot cron running; re-run next season.[/yellow]"
+        )
+    elif ml["t_best_vs_live"] >= 2.0 and abs(ml["best_lambda"] - MARKET_SHRINKAGE_LAMBDA) >= 0.1:
+        console.print(
+            f"\n[green]Verdict: λ={ml['best_lambda']:.2f} beats the live λ={MARKET_SHRINKAGE_LAMBDA:.2f} "
+            f"(t={ml['t_best_vs_live']:+.2f}) — consider updating MARKET_SHRINKAGE_LAMBDA.[/green]"
+        )
+    else:
+        console.print(
+            f"\n[green]Verdict: live λ={MARKET_SHRINKAGE_LAMBDA:.2f} is within noise of the best "
+            f"(t={ml['t_best_vs_live']:+.2f}); no change.[/green]"
+        )
+
+
 @app.command(name="predict-path-eval")
 def predict_path_eval(split: str = "2025-07-01") -> None:
     """A/B the live prediction feature path on a walk-forward holdout.
