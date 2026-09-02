@@ -15,6 +15,7 @@ from nba_betting.features.four_factors import (
 )
 from nba_betting.features.rest_days import add_rest_features
 from nba_betting.models.elo import (
+    availability_elo_adjustment_vec,
     compute_all_elos,
     predict_home_win_prob,
     rest_elo_adjustment_vec,
@@ -312,6 +313,15 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
               "away_elo_off", "away_elo_def"):
         game_features[c] = game_features[c].fillna(INITIAL_ELO)
 
+    # Step 6b: Player-availability features from the player game logs
+    # (features/availability.py) — which regular-rotation players did NOT
+    # play, weighted by their typical minutes / production. Attached here
+    # because the Elo prediction column below includes the availability
+    # adjustment. Rows without player logs (or the first game of a season,
+    # before any regulars are known) get 0 = "unknown, average", the same
+    # convention the live path uses when it has no regulars for a team.
+    _attach_availability_features(game_features)
+
     # Step 7: Add differential features
     game_features["elo_diff"] = game_features["home_elo"] - game_features["away_elo"]
     # Tier 1.3 — split Elo differentials. The model already sees the
@@ -342,9 +352,12 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     _rest_adj = rest_elo_adjustment_vec(
         game_features["home_rest_days"], game_features["away_rest_days"],
     )
+    _avail_adj = availability_elo_adjustment_vec(
+        game_features["home_missing_minutes_pct"], game_features["away_missing_minutes_pct"],
+    )
     _elo_diff_for_prob = (
         game_features["away_elo"]
-        - (game_features["home_elo"] + ELO_HOME_ADVANTAGE + _rest_adj)
+        - (game_features["home_elo"] + ELO_HOME_ADVANTAGE + _rest_adj + _avail_adj)
     )
     game_features["elo_home_prob"] = 1.0 / (1.0 + np.power(10.0, _elo_diff_for_prob / 400.0))
 
@@ -465,19 +478,8 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     # them so that subsequent column assignments don't trigger PerformanceWarning.
     game_features = game_features.copy()
 
-    # Step 7d: Player impact features (WAT score, missing-minutes %,
-    # star-out flag). Historical games get 0.0 — no per-game player
-    # availability archive exists for the training set. Live predictions
-    # inject actual values via compute_player_impact_features at predict
-    # time. Same forward-accumulating convention as injury_impact.
-    game_features = game_features.assign(
-        home_missing_minutes_pct=0.0,
-        away_missing_minutes_pct=0.0,
-        home_star_out=0.0,
-        away_star_out=0.0,
-        diff_missing_minutes_pct=0.0,
-        diff_available_talent=0.0,
-    )
+    # (Step 7d — player-availability features — now attached in Step 6b
+    # from real player game logs; they used to be constant 0.0 here.)
 
     # Step 8: Select final feature columns
     model_features = (
@@ -584,6 +586,45 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     X.attrs["feature_means"] = feature_means
 
     return X, y
+
+
+def _attach_availability_features(game_features: pd.DataFrame) -> None:
+    """Add the six player-availability columns (in-place) from the player
+    game logs: ``home/away_missing_minutes_pct``, ``home/away_star_out``,
+    ``diff_missing_minutes_pct``, ``diff_available_talent`` (home − away
+    share of usual production available). Best-effort: an empty
+    ``player_game_stats`` table or any failure yields 0.0 everywhere,
+    which is the pre-2026-09 behaviour.
+    """
+    cols = ["home_missing_minutes_pct", "away_missing_minutes_pct",
+            "home_star_out", "away_star_out",
+            "diff_missing_minutes_pct", "diff_available_talent"]
+    try:
+        from nba_betting.features.availability import (
+            compute_availability_features, load_player_game_df,
+        )
+        av = compute_availability_features(load_player_game_df())
+    except Exception:
+        av = None
+    if av is None or av.empty:
+        for c in cols:
+            game_features[c] = 0.0
+        return
+
+    for side, tid_col in (("home", "home_team_id"), ("away", "away_team_id")):
+        merged = game_features[["game_id", tid_col]].merge(
+            av.rename(columns={"team_id": tid_col}), on=["game_id", tid_col], how="left",
+        )
+        game_features[f"{side}_missing_minutes_pct"] = merged["missing_minutes_pct"].fillna(0.0).values
+        game_features[f"{side}_star_out"] = merged["star_out"].fillna(0.0).values
+        game_features[f"_{side}_available_talent"] = merged["available_talent"].fillna(0.0).values
+    game_features["diff_missing_minutes_pct"] = (
+        game_features["home_missing_minutes_pct"] - game_features["away_missing_minutes_pct"]
+    )
+    game_features["diff_available_talent"] = (
+        game_features["_home_available_talent"] - game_features["_away_available_talent"]
+    )
+    game_features.drop(columns=["_home_available_talent", "_away_available_talent"], inplace=True)
 
 
 def _attach_injury_features(game_features: pd.DataFrame) -> None:
@@ -947,6 +988,7 @@ def build_prediction_features(
     # extra_features (PredictionEngine injects those for upcoming games).
     row["elo_home_prob"] = predict_home_win_prob(
         home_elo, away_elo, row.get("home_rest_days"), row.get("away_rest_days"),
+        row.get("home_missing_minutes_pct"), row.get("away_missing_minutes_pct"),
     )
 
     df = pd.DataFrame([row])

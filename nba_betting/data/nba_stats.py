@@ -9,7 +9,7 @@ import pandas as pd
 from sqlalchemy import select
 
 from nba_betting.config import NBA_API_DELAY_SECONDS, CURRENT_SEASON
-from nba_betting.db.models import Team, Game, GameStats
+from nba_betting.db.models import Team, Game, GameStats, PlayerGameStat
 from nba_betting.db.session import get_session
 
 _last_request_time = 0.0
@@ -303,3 +303,80 @@ def sync_season(season: str = CURRENT_SEASON) -> int:
         session.close()
 
     return new_games
+
+
+def fetch_season_player_logs(season: str = CURRENT_SEASON) -> pd.DataFrame:
+    """Per-PLAYER game logs for a season (Regular Season + Play-In +
+    Playoffs), one API call per segment. Same tolerance as
+    ``fetch_season_games`` for empty segments. One row per player per game
+    appeared in; players who did not dress have no row.
+    """
+    from nba_api.stats.endpoints import leaguegamelog
+
+    frames: list[pd.DataFrame] = []
+    for segment in _SEASON_SEGMENTS:
+        try:
+            _rate_limit()
+            log = leaguegamelog.LeagueGameLog(
+                season=season,
+                player_or_team_abbreviation="P",
+                season_type_all_star=segment,
+                timeout=60,
+            )
+            seg_df = log.get_data_frames()[0]
+        except Exception:
+            continue
+        if seg_df is not None and not seg_df.empty:
+            frames.append(seg_df)
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.drop_duplicates(subset=["GAME_ID", "PLAYER_ID"], keep="first")
+
+
+def sync_player_game_stats(season: str = CURRENT_SEASON) -> int:
+    """Store player game logs for games already in ``games``. Returns the
+    number of rows added. Idempotent: games that already have player rows
+    are skipped, so the daily ``sync`` only pays for new games.
+    """
+    df = fetch_season_player_logs(season)
+    if df.empty:
+        return 0
+
+    session = get_session()
+    try:
+        known_games = {row[0] for row in session.execute(select(Game.id)).all()}
+        have_rows = {
+            row[0] for row in session.execute(
+                select(PlayerGameStat.game_id).distinct()
+            ).all()
+        }
+        df = df[df["GAME_ID"].astype(str).isin(known_games - have_rows)]
+        if df.empty:
+            return 0
+
+        def _int(v) -> int:
+            try:
+                return int(v) if v == v else 0  # NaN-safe
+            except (TypeError, ValueError):
+                return 0
+
+        rows = [
+            PlayerGameStat(
+                game_id=str(r.GAME_ID),
+                team_id=int(r.TEAM_ID),
+                player_id=int(r.PLAYER_ID),
+                player_name=str(r.PLAYER_NAME),
+                minutes=_int(r.MIN),
+                pts=_int(r.PTS),
+                ast=_int(r.AST),
+                reb=_int(r.REB),
+                plus_minus=float(r.PLUS_MINUS) if r.PLUS_MINUS == r.PLUS_MINUS else 0.0,
+            )
+            for r in df.itertuples(index=False)
+        ]
+        session.bulk_save_objects(rows)
+        session.commit()
+        return len(rows)
+    finally:
+        session.close()
