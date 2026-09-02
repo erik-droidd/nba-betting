@@ -16,6 +16,7 @@ from nba_betting.config import (
     MIN_EDGE_THRESHOLD,
     MARKET_SHRINKAGE_LAMBDA,
     MIN_BET_SIDE_PROB,
+    APPLY_POST_HOC_INJURY_ADJUSTMENT,
 )
 
 
@@ -165,12 +166,17 @@ def generate_recommendations(
         else:
             model_home_prob = predict_fn(home_elo, away_elo)
 
-        # Apply injury adjustments (model has no player data, so adjust post-hoc)
+        # Heuristic injury estimate, kept for display (home/away_injury_adj).
+        # Since 2026-09 availability is modelled INSIDE the prediction (Elo
+        # availability term + GBM availability features, both trained on
+        # real participation history), so applying this on top would
+        # double-count; see config.APPLY_POST_HOC_INJURY_ADJUSTMENT.
         home_inj_adj = get_team_injury_adjustment(home_abbr)
         away_inj_adj = get_team_injury_adjustment(away_abbr)
-        # Net adjustment: home injuries hurt home, away injuries help home
-        net_adj = home_inj_adj - away_inj_adj
-        model_home_prob = max(0.01, min(0.99, model_home_prob + net_adj))
+        if APPLY_POST_HOC_INJURY_ADJUSTMENT:
+            # Net adjustment: home injuries hurt home, away injuries help home
+            net_adj = home_inj_adj - away_inj_adj
+            model_home_prob = max(0.01, min(0.99, model_home_prob + net_adj))
 
         market_match = match_odds_for_game(
             market_index, frozenset([home_abbr, away_abbr]), game_date_et(game)

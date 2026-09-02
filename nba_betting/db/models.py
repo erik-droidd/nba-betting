@@ -102,6 +102,32 @@ class PlayerStat(Base):
     team = relationship("Team", foreign_keys=[team_id])
 
 
+class PlayerGameStat(Base):
+    """One row per player per game they appeared in (NBA.com player game
+    log, ``LeagueGameLog(player_or_team_abbreviation="P")``).
+
+    This is the historical player-availability source (2026-09): a
+    rotation regular with no row for a game (or 0 minutes) was out. From
+    it ``features/availability.py`` derives missing-minutes / star-out /
+    available-talent features for every historical game — the first time
+    those features carry real signal in training — and the "typical
+    minutes" each live injury is weighted by. Synced by ``sync`` alongside
+    the team game logs (one API call per season segment).
+    """
+    __tablename__ = "player_game_stats"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    game_id = Column(String(20), ForeignKey("games.id"), nullable=False, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False, index=True)
+    player_id = Column(Integer, nullable=False, index=True)
+    player_name = Column(String(100))
+    minutes = Column(Integer)
+    pts = Column(Integer)
+    ast = Column(Integer)
+    reb = Column(Integer)
+    plus_minus = Column(Float)
+
+
 class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
 

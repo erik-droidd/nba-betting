@@ -60,6 +60,27 @@ ELO_CARRYOVER = 0.75
 # optimal, carryover flat across 0.6-0.8, and a linear rest-days term adds
 # nothing beyond the b2b flag. Recompute Elos and retrain after changing.
 ELO_B2B_PENALTY = 25.0
+# Player-availability term in Elo points per 100% of a team's regular-
+# rotation minutes missing (features/availability.py). A star carrying
+# ~15% of rotation minutes out -> -22 Elo (~3pp); a full rest night
+# (tank-mode end of season) -> -150. Applied in prediction AND update so a
+# team resting its stars is not docked rating. Chosen 2026-09 by replay on
+# 5 seasons (eval 2022-23..2025-26, n=5268, on top of the b2b penalty):
+# scale 100 -> Brier -0.0015 (t +6.2), 150 -> -0.0020 (t +5.5), 200 ->
+# -0.0023 (t +4.8); positive in EVERY eval season (t +2.0..+4.6 at 150).
+# Training uses actual participation, so this is an upper bound on the
+# live effect, which relies on the ESPN injury report. Recompute Elos and
+# retrain after changing.
+ELO_AVAILABILITY_SCALE = 150.0
+# The pre-2026-09 post-hoc injury adjustment (`get_team_injury_adjustment`,
+# impact_rating * 0.006 per injured player, added to the model probability
+# in generate_recommendations) was never validated and now double-counts:
+# availability enters the Elo term above AND the GBM's availability
+# features, both fitted on real historical participation. The estimate is
+# still computed and shown (home/away_injury_adj on the recommendation)
+# but no longer applied to the probability. Flip to True only with a
+# harness result that says the extra shift helps.
+APPLY_POST_HOC_INJURY_ADJUSTMENT = False
 
 # NBA API rate limiting. Tier 3.3 — 1.5s is the empirically observed
 # "safe" floor for stats.nba.com without triggering 429s during backfill

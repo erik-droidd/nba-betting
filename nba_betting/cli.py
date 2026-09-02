@@ -392,6 +392,8 @@ def sync(
         season_str = f"{year}-{str(year + 1)[-2:]}"
         season_list.append(season_str)
 
+    from nba_betting.data.nba_stats import sync_player_game_stats
+
     total_new = 0
     for season in season_list:
         console.print(f"[dim]Syncing {season}...[/dim]")
@@ -401,6 +403,14 @@ def sync(
             console.print(f"  Added [green]{new}[/green] new games")
         except Exception as e:
             console.print(f"  [red]Error: {e}[/red]")
+        # Player game logs (availability source) for the same season —
+        # only games without player rows are fetched into the table.
+        try:
+            prow = sync_player_game_stats(season)
+            if prow:
+                console.print(f"  Added [green]{prow}[/green] player-game rows")
+        except Exception as e:
+            console.print(f"  [yellow]Player logs skipped: {e}[/yellow]")
 
     console.print(f"\n[bold]Total new games added: {total_new}[/bold]")
 

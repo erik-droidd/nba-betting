@@ -99,7 +99,9 @@ nba_betting/
 │                                 PlayerStat, OddsSnapshot tables
 │
 ├── data/
-│   ├── nba_stats.py            — NBA.com client (ScoreboardV3 + LeagueGameLog).
+│   ├── nba_stats.py            — NBA.com client (ScoreboardV3 + LeagueGameLog,
+│   │                              team AND player game logs — the latter
+│   │                              fill player_game_stats via `sync`).
 │   │                              ⚠ Uses ET timezone via zoneinfo for "today".
 │   │                              ⚠ Never uses live ScoreBoard() — it caches
 │   │                                 stale prior-day data for hours after rollover.
@@ -172,15 +174,19 @@ nba_betting/
 │   │                              alone cost ~5.7s of the ~6.3s feature
 │   │                              build. Equivalence pinned by
 │   │                              tests/test_rest_features.py.
-│   ├── player_impact.py        — ESPN-driven player features: WAT score,
-│   │                              missing_minutes_pct, star_out flag.
-│   │                              compute_player_impact_features() is called
-│   │                              at predict time (cli.py + api/routes.py)
-│   │                              and injects live values into extra_features.
-│   │                              Training uses 0.0 for all historical rows
-│   │                              (same forward-accumulating convention as
-│   │                              injury_impact); the model learns the signal
-│   │                              once live data accumulates.
+│   ├── availability.py         — Player-availability features from the
+│   │                              player game logs (player_game_stats):
+│   │                              which regular-rotation players did NOT
+│   │                              play, weighted by typical minutes /
+│   │                              production. Training (actual
+│   │                              participation) and live (injury list ×
+│   │                              miss prob over the same regulars) use
+│   │                              ONE set of definitions. Also feeds the
+│   │                              Elo availability term.
+│   ├── player_impact.py        — Live wrapper: compute_player_impact_features()
+│   │                              = availability.expected_availability for
+│   │                              both teams, injected into extra_features
+│   │                              by PredictionEngine.
 │   └── builder.py              — THE assembler. Two entry points:
 │                                   build_feature_matrix(recompute_elos=True)
 │                                   for training (flag skips Elo rebuild when
@@ -195,9 +201,11 @@ nba_betting/
 ├── models/
 │   ├── elo.py                  — 538-style Elo with home advantage,
 │   │                              538 MOV multiplier, a back-to-back
-│   │                              penalty (rest_elo_adjustment, applied
-│   │                              in prediction AND update), season
-│   │                              carryover, and a parallel off/def split.
+│   │                              penalty and a player-availability term
+│   │                              (rest_elo_adjustment /
+│   │                              availability_elo_adjustment, both
+│   │                              applied in prediction AND update),
+│   │                              season carryover, and an off/def split.
 │   │                              get_current_elos() and
 │   │                              get_current_off_def_elos() read the
 │   │                              latest EloRating rows per team.
@@ -516,30 +524,44 @@ The final model-feature list is assembled in `builder.py::build_feature_matrix()
 step 8 as `model_features` and is stored to `feature_cols.joblib` by the
 training path so inference can round-trip it.
 
-### 4.10 Player impact features
+### 4.10 Player-availability features (`features/availability.py`)
 
-`features/player_impact.py::compute_player_impact_features()` produces 6
-features from the current ESPN injury list + `PlayerStat` roster:
+Six features from the **player game logs** (`player_game_stats`, one row
+per player per game appeared in, synced by `sync`; 140k rows over five
+seasons):
 
-- `home_missing_minutes_pct` / `away_missing_minutes_pct`: fraction of
-  each team's typical minutes unavailable due to injury/rest.
-- `home_star_out` / `away_star_out`: 1.0 if any player averaging ≥ 30 mpg
-  is at least 50% likely to miss (Out/Doubtful).
-- `diff_missing_minutes_pct`: home minus away missing-minutes fraction.
-- `diff_available_talent`: home minus away Weighted Available Talent
-  (WAT = Σ (pts + ast + reb) × P(available) per player).
+- `home_missing_minutes_pct` / `away_missing_minutes_pct`: share of the
+  team's regular-rotation minutes that did not play.
+- `home_star_out` / `away_star_out`: 1.0 if an absent regular averages
+  ≥ 30 minutes.
+- `diff_missing_minutes_pct`: home − away missing share.
+- `diff_available_talent`: home − away share of usual production
+  (pts + ast + reb of regulars) that dressed.
 
-**Training**: all 6 features are set to 0.0 for every historical game
-(no per-game player availability archive exists). The model learns to
-treat 0 as "unknown, average" — the same forward-accumulating convention
-as `injury_impact_out`. Signal accumulates as live predictions write real
-values and the model is retrained.
+Definitions, identical for training and live: a player's *typical*
+minutes/production is the mean over his last 10 appearances for the team
+within the season, shifted one game (no leakage); a *regular* appeared in
+≥ 60% of the team's last 5 games this season with typical minutes ≥ 12;
+a regular who has since appeared for another team is *departed*, not
+absent. Season-scoped so off-season departures never read as absences.
+The first game of a season has no regulars → 0 ("unknown, average"),
+which is the same cold-start value the live path emits for a team with
+no known regulars.
 
-**Prediction time**: `cli.py::_xgb_predict` and `api/routes.py::_predict`
-call `compute_player_impact_features()` and inject the results into
-`extra_features` before `build_prediction_features()`. The `injuries`
-list is captured from the outer closure scope and already includes
-ESPN sync + lineup bump adjustments.
+**Training** uses actual participation (a regular with no row was out).
+**Live** (`player_impact.compute_player_impact_features`, via
+`availability.expected_availability`) matches each team's current
+regulars to the ESPN injury list by normalized name and weights by the
+status miss-probability. Training therefore knows availability exactly
+while live only expects it — the OOF gains are an upper bound on the
+live effect, which relies on the injury report (dominated by "Out"
+entries, which are reliable). Until 2026-09 these six columns were
+constant 0.0 in training (no history existed) and the live values were
+weighted by `PlayerStat` minutes that no sync ever populated — the
+features were inert on both sides. Now `diff_available_talent` is the
+GBM's #2 permutation-importance feature, and the same missing share
+drives the **Elo availability term** (§5.1), which is how the signal
+reaches the 80-90% Elo component of every prediction.
 
 ### 4.6 Imputation strategy
 
@@ -591,6 +613,19 @@ ESPN sync + lineup bump adjustments.
   `build_prediction_features` use the identical formula — the engine
   injects schedule-correct rest before it is evaluated (§4.2) — so the OOF
   arrays, the backtest's Elo proxy, and live predictions all agree.
+- **Player-availability term `ELO_AVAILABILITY_SCALE = 150`** (added
+  2026-09): `−150 × (home_missing_pct − away_missing_pct)` Elo points,
+  where each side is the share of its regular-rotation minutes missing
+  (§4.10), applied in prediction AND update (a team resting its stars is
+  not docked rating). A star carrying ~15% of minutes ≈ −22 Elo ≈ 3pp; a
+  full rest night ≈ −150. Replay on 5 seasons on top of the b2b penalty
+  (eval 2022-23..2025-26, n=5268): scale 100 → Brier −0.0015 (t +6.2),
+  **150 → −0.0020 (t +5.5)**, 200 → −0.0023 (t +4.8); positive in every
+  eval season (t +2.0..+4.6 at 150). The biggest single gain in the
+  project since the home-advantage calibration: Elo OOF Brier 0.2096 →
+  0.2077 in `train`. Training uses actual participation, so this is an
+  upper bound on the live effect (injury report). `compute_all_elos()`
+  computes the per-game shares from the player logs; no logs → 0.
 - Season carryover `ELO_CARRYOVER = 0.75` applied at the season boundary
   (`compute_all_elos()` detects season changes).
 - **History: 5 seasons since 2026-09** (2021-22 through 2025-26, 6,591
@@ -714,28 +749,27 @@ favorite" signal.
 predictions** (not the isotonic calibration slice — see §6.11).
 Persisted to `trained_models/ensemble_weight.joblib` and reloaded at
 prediction time (mtime-cached in-process — it's consulted on every
-ensemble prediction). Current learned value: **0.80** (2026-09, after the Elo b2b adjustment,
-the regularized GBM and the 5-season history; OOF n=3948, 3 folds):
-log-loss w=0.7 0.6056, **w=0.8 0.6055**, w=0.9 0.6057, w=1.0 (pure Elo)
-0.6060. The blend is within noise of pure Elo (paired-Brier t ≈ +1). The
-GBM earns 0.20 because it is no longer a liability, not because it adds
-much: **on box-score features the GBM carries no information beyond
-Elo + rest.** A 2026-09 diagnostic pinned this from several directions —
-a GBM on `elo_home_prob` alone loses to the Elo formula (overfitting,
+ensemble prediction). Current learned value: **0.90** (2026-09, after the Elo b2b + availability
+terms, the regularized GBM and the 5-season history; OOF n=3948, 3 folds).
+The blend is within noise of pure Elo: on box-score features the GBM
+carries no information beyond Elo + rest, and the availability signal
+now enters Elo directly (§5.1), so the GBM's marginal contribution is
+again thin (w=0.9 vs w=1.0 differ by <0.001 log-loss). A 2026-09
+diagnostic pinned the box-score conclusion from several directions — a
+GBM on `elo_home_prob` alone loses to the Elo formula (overfitting,
 fixed by regularization — §5.2); the regularized GBM on every feature
 subset (rest, off/def Elo, form, Four Factors, all diffs, everything)
 lands at Brier 0.2124-0.2134 vs Elo's 0.2096 (t ≈ -3); L2 logistic
-stackers on [elo_logit + 7 or 17 rest/form features] tie Elo exactly
-(0.2096-0.2097); and two extra seasons of history did not help the GBM
-(fold-3 Brier 0.2145 with 5 seasons vs 0.2121 with 3). The lever that
-remains is information Elo cannot see — injuries, lineups, the market —
-which only the live-data features carry (§4.10, §10.2). Its share still
-matters structurally: the GBM is the only model that consumes the
-injury / line-movement / player-availability features, so its share is
-the conduit through which the maturing live-data features reach
-production predictions. (History: 0.90 after the 2026-07 MOV-dampening
-removal; 0.70 in 2026-06 once per-fold calibration was fixed to sigmoid;
-0.30 before §6.11 — that value was an in-sample artifact.)
+stackers on [elo_logit + 7 or 17 rest/form features] tie Elo exactly;
+and two extra seasons of history did not help the GBM. The lever that
+DID work is information Elo could not see — player availability — and
+the right place for it turned out to be Elo itself, not the blend. The
+GBM's share still matters structurally as the conduit for the
+injury-impact / line-movement features it alone consumes. (History:
+0.80 earlier in 2026-09 before the availability term; 0.90 after the
+2026-07 MOV-dampening removal; 0.70 in 2026-06 once per-fold
+calibration was fixed to sigmoid; 0.30 before §6.11 — that value was an
+in-sample artifact.)
 
 > **Can the GBM be made to pull more weight?** Investigated thoroughly
 > (issue #23): regularization (shallower/fewer trees, higher `l2`,
@@ -1145,6 +1179,8 @@ Everything worth tuning is in one file. The most impactful knobs:
 | `ELO_HOME_ADVANTAGE` | `40.0` | Home bonus in Elo points — calibrated to the modern ~55% home-win rate, not the 538 default of 100. See §6.10 |
 | `ELO_CARRYOVER` | `0.75` | Season-to-season Elo persistence |
 | `ELO_B2B_PENALTY` | `25.0` | Second-night-of-a-back-to-back penalty in Elo points, applied in prediction AND rating update. See §5.1 |
+| `ELO_AVAILABILITY_SCALE` | `150.0` | Elo points per 100% of regular-rotation minutes missing, prediction AND update. See §5.1 / §4.10 |
+| `APPLY_POST_HOC_INJURY_ADJUSTMENT` | `False` | The old heuristic ±impact×0.006 shift is display-only now (availability is modelled inside Elo + GBM); True re-applies it on top |
 | `CURRENT_SEASON` | derived | `season_for_date(today)` — rolls over July 1, so `sync` follows the league without an annual edit |
 | `NBA_API_DELAY_SECONDS` | `1.5` | NBA.com rate limit (reduced from 2.5) |
 | `ESPN_API_DELAY_SECONDS` | `0.8` | ESPN rate limit (reduced from 1.5) |
@@ -1183,19 +1219,22 @@ print('OK')
 
 # 5. Walk-forward still in the expected range
 .venv/bin/python3 -m nba_betting train
-# Expect (2026-09, 3 folds, n≈3950): GBM-only WF accuracy ~66%, Brier
-# ~0.213, log-loss ~0.615; "Elo (out-of-fold)" Brier ~0.210 / ECE < 0.01;
-# "GBM (out-of-fold)" Brier ~0.212; learned Elo weight 0.7-0.9. The blend
-# is within noise of pure Elo (§5.4) — a GBM table materially WORSE than
-# ~0.215 Brier means the regularization regressed. `elo_home_prob` should
-# dominate permutation importance, with diff_net_rtg_game_ewm_10 second.
+# Expect (2026-09, 3 folds, n≈3950, player logs synced): GBM-only WF
+# accuracy ~67%, Brier ~0.212, log-loss ~0.612; "Elo (out-of-fold)" Brier
+# ~0.208 / ECE < 0.01; "GBM (out-of-fold)" Brier ~0.211; learned Elo
+# weight 0.8-0.9. The blend is within noise of pure Elo (§5.4) — a GBM
+# table materially WORSE than ~0.215 Brier means the regularization
+# regressed; an Elo line above ~0.2095 means the availability term or the
+# player logs are missing (check `player_game_stats` is populated).
+# `elo_home_prob` should dominate permutation importance, with
+# diff_available_talent second.
 
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (114 tests across ten files).
+# 7. Full test suite (134 tests across thirteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 114 passed in < 5s.
+# Expect: 134 passed in < 5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
@@ -1216,6 +1255,13 @@ print('OK')
 #   build_prediction_features uses the FINAL rest values)
 # test_season_and_snapshot_dates.py — 3 tests (season_for_date rollover,
 #   snapshot_game_date ET keying)
+# test_injury_jsonl.py       —  6 tests (daily injury JSONL capture/import)
+# test_injury_sync.py        —  4 tests (ESPN id recovery, manual-override
+#   flag, case-insensitive statuses)
+# test_availability.py       —  5 tests (leak-free availability features,
+#   season scoping / trades, live expected availability)
+# test_elo_availability.py   —  5 tests (Elo availability term, compute_all_elos
+#   threads it, prediction-row consistency, post-hoc adjustment display-only)
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -1714,16 +1760,13 @@ substantive changes, each empirically gated; artifacts retrained.
 
 - Meta-learner and hyperparameter search remain unwired (documented
   decisions, §5.2/§5.4).
-- Injury impact is applied post-hoc in `generate_recommendations` AND
-  exists as a GBM feature; today the feature is ~0 for most training rows
-  so there's no real double-count, but as `historical_injuries` coverage
-  matures the model will learn the feature and the post-hoc adjustment
-  should be phased out — revisit at the readiness-status READY tier.
-- `PlayerStat.minutes/points/assists/rebounds_per_game` are never
-  populated by any sync (roster sync writes zeros), so the WAT
-  "available talent" features are inert: constant-0 in training means the
-  GBM cannot split on them, and live values have no effect. Needs a real
-  per-player stats source before the player-impact block can matter.
+- ~~Injury impact applied post-hoc AND as a GBM feature~~ — **resolved
+  2026-09**: availability is modelled inside Elo and the GBM from real
+  participation history; the post-hoc shift is display-only
+  (`APPLY_POST_HOC_INJURY_ADJUSTMENT = False`).
+- ~~`PlayerStat` minutes never populated, WAT features inert~~ —
+  **resolved 2026-09** by the player game logs (§4.10); `PlayerStat` is
+  no longer on the prediction path.
 - The API predict route reads `injuries.json` without syncing ESPN first
   (CLI syncs); acceptable divergence while the API is for local use.
 
@@ -1809,3 +1852,25 @@ explicit override flag (legacy id-less records load as "espn" and are
 dropped by the next sync); status lookups are case-insensitive (ESPN
 sends ``Day-To-Day``, which the exact-match table sent to the 0.5
 default). `tests/test_injury_sync.py` pins all three.
+
+**Follow-up (same pass): real player-availability features + Elo
+availability term.** New `player_game_stats` table (NBA player game logs,
+one API call per season segment, 140,693 rows for five seasons, synced by
+`sync`) and `features/availability.py` (§4.10). The six availability
+features are real in training for the first time and computed live from
+the same regulars; the same missing-minutes share enters Elo as
+`ELO_AVAILABILITY_SCALE = 150` (§5.1). Results: replay Elo Brier −0.0020
+(t +5.5, every season positive); `train` Elo OOF Brier 0.2096 → 0.2077,
+GBM 0.2124 → 0.2113, WF accuracy 66.2% → 67.1%; `diff_available_talent`
+is the #2 GBM feature. The post-hoc injury adjustment is retired
+(display-only). The Elo-proxy backtest ROI fell from +4.1% to ~0% with
+~40% fewer bets — expected and documented in §6.6: the proxy is now
+strong enough that the raw GBM rarely disagrees with it, so that upper
+bound has lost most of its meaning; use `--real-odds` as coverage grows
+(currently 3%: +4.7% over 149 bets, not yet informative).
+`predict-path-eval` unchanged (lag t −0.25, fresh-rest t +0.14 — noise).
+Cold-start caveat: for the first ~5 games of a season the live regulars
+come from the previous season's final games (often a tank-mode rotation),
+so a listed star may not match a regular and the term reads 0 — the
+training rows behave the same way, so train/predict stay consistent, and
+it self-corrects after five games.

@@ -56,6 +56,7 @@ class PredictionEngine:
         self.driver_model = None
         self._actual_model = None
         self._regressors = None
+        self.regulars: dict = {}
         self._load()
 
     def _load(self) -> None:
@@ -93,6 +94,15 @@ class PredictionEngine:
 
         from nba_betting.models.spreads_totals import load_regressors
         self._regressors = load_regressors()
+
+        # Current regulars per team (player game logs) for the live
+        # availability features + the Elo availability term. Best-effort:
+        # an unsynced player_game_stats table means neutral zeros.
+        try:
+            from nba_betting.features.availability import latest_regulars, load_player_game_df
+            self.regulars = latest_regulars(load_player_game_df())
+        except Exception:
+            self.regulars = {}
         self.model_name = "ensemble"
         self.available = True
 
@@ -137,6 +147,10 @@ class PredictionEngine:
         # feeds the Elo b2b adjustment in every Elo call below.
         h_rest_days = None
         a_rest_days = None
+        # Expected share of regular-rotation minutes missing (None when
+        # unknown); feeds the Elo availability term.
+        h_missing = None
+        a_missing = None
         if home_id and away_id:
             _game = next(
                 (g for g in self.games
@@ -184,13 +198,18 @@ class PredictionEngine:
                     from nba_betting.features.player_impact import (
                         compute_player_impact_features,
                     )
-                    extra.update(compute_player_impact_features(
+                    pif = compute_player_impact_features(
                         home_id, away_id, self.injuries,
                         home_abbr=_game["home_team_abbr"],
                         away_abbr=_game["away_team_abbr"],
-                    ))
+                        regulars=self.regulars,
+                    )
+                    extra.update(pif)
+                    if self.regulars.get(home_id) and self.regulars.get(away_id):
+                        h_missing = pif["home_missing_minutes_pct"]
+                        a_missing = pif["away_missing_minutes_pct"]
                 except Exception:
-                    pass  # Non-critical; model trained with 0 as neutral value
+                    pass  # Non-critical; cold-start rows are 0 in training too
 
         h_off_def = self.off_def_elos.get(home_id) if home_id else None
         a_off_def = self.off_def_elos.get(away_id) if away_id else None
@@ -206,7 +225,9 @@ class PredictionEngine:
             injury_impacts=self._idx_cache.get("injury"),
         )
         if feat_row is None:
-            return predict_home_win_prob(home_elo, away_elo, h_rest_days, a_rest_days)
+            return predict_home_win_prob(
+                home_elo, away_elo, h_rest_days, a_rest_days, h_missing, a_missing,
+            )
 
         for col in self.feature_cols:
             if col not in feat_row.columns:
@@ -226,6 +247,8 @@ class PredictionEngine:
                     pass
 
         if self.blend:
-            elo_prob = predict_home_win_prob(home_elo, away_elo, h_rest_days, a_rest_days)
+            elo_prob = predict_home_win_prob(
+                home_elo, away_elo, h_rest_days, a_rest_days, h_missing, a_missing,
+            )
             return ensemble_predict(elo_prob, xgb_prob)
         return xgb_prob

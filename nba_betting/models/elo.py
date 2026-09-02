@@ -37,6 +37,7 @@ from nba_betting.config import (
     ELO_HOME_ADVANTAGE,
     ELO_CARRYOVER,
     ELO_B2B_PENALTY,
+    ELO_AVAILABILITY_SCALE,
 )
 from nba_betting.db.models import Game, Team, EloRating
 from nba_betting.db.session import get_session
@@ -77,6 +78,35 @@ def rest_elo_adjustment(
     return adj
 
 
+def availability_elo_adjustment(
+    home_missing_pct: float | None,
+    away_missing_pct: float | None,
+) -> float:
+    """Elo points added to the HOME side for player availability:
+    ``-ELO_AVAILABILITY_SCALE * (home_missing - away_missing)`` where each
+    side is the share of its regular-rotation minutes missing (0-1, see
+    features/availability.py). ``None``/NaN on either side -> 0.
+    """
+    if home_missing_pct is None or away_missing_pct is None:
+        return 0.0
+    try:
+        h = float(home_missing_pct)
+        a = float(away_missing_pct)
+    except (TypeError, ValueError):
+        return 0.0
+    if h != h or a != a:
+        return 0.0
+    return -ELO_AVAILABILITY_SCALE * (h - a)
+
+
+def availability_elo_adjustment_vec(home_missing_pct, away_missing_pct) -> np.ndarray:
+    """Vectorized :func:`availability_elo_adjustment`; NaN -> 0 per row."""
+    h = np.asarray(home_missing_pct, dtype=float)
+    a = np.asarray(away_missing_pct, dtype=float)
+    adj = -ELO_AVAILABILITY_SCALE * (h - a)
+    return np.where(np.isnan(adj), 0.0, adj)
+
+
 def rest_elo_adjustment_vec(home_rest_days, away_rest_days) -> np.ndarray:
     """Vectorized :func:`rest_elo_adjustment` for the training matrix.
     NaN rest on either side -> 0 adjustment for that row."""
@@ -108,15 +138,20 @@ def update_elo(
     k: float = ELO_K_FACTOR,
     home_rest_days: float | None = None,
     away_rest_days: float | None = None,
+    home_missing_pct: float | None = None,
+    away_missing_pct: float | None = None,
 ) -> tuple[float, float]:
     """Update aggregate Elo ratings after a game. Returns (new_home_elo, new_away_elo).
 
-    The expectation includes home advantage AND the rest adjustment, so a
-    back-to-back loss costs less rating than a rested loss — schedule
-    effects stay out of the rating itself.
+    The expectation includes home advantage, the rest adjustment AND the
+    availability adjustment, so a back-to-back loss or a loss with the
+    stars resting costs less rating than a full-strength rested loss —
+    schedule and roster-availability effects stay out of the rating.
     """
     home_expected = expected_score(
-        home_elo + ELO_HOME_ADVANTAGE + rest_elo_adjustment(home_rest_days, away_rest_days),
+        home_elo + ELO_HOME_ADVANTAGE
+        + rest_elo_adjustment(home_rest_days, away_rest_days)
+        + availability_elo_adjustment(home_missing_pct, away_missing_pct),
         away_elo,
     )
     home_win = 1.0 if home_score > away_score else 0.0
@@ -204,11 +239,16 @@ def predict_home_win_prob(
     away_elo: float,
     home_rest_days: float | None = None,
     away_rest_days: float | None = None,
+    home_missing_pct: float | None = None,
+    away_missing_pct: float | None = None,
 ) -> float:
     """Predict P(home win) including home-court advantage and, when the
-    schedule context is supplied, the back-to-back adjustment."""
+    context is supplied, the back-to-back and player-availability
+    adjustments (each 0 when its inputs are None)."""
     return expected_score(
-        home_elo + ELO_HOME_ADVANTAGE + rest_elo_adjustment(home_rest_days, away_rest_days),
+        home_elo + ELO_HOME_ADVANTAGE
+        + rest_elo_adjustment(home_rest_days, away_rest_days)
+        + availability_elo_adjustment(home_missing_pct, away_missing_pct),
         away_elo,
     )
 
@@ -237,6 +277,21 @@ def compute_all_elos() -> dict[int, float]:
 
         # Clear existing Elo records
         session.query(EloRating).delete()
+
+        # Per (game, team) share of regular-rotation minutes missing, from
+        # the player game logs (features/availability.py). Empty when the
+        # player_game_stats table hasn't been synced -> no adjustment.
+        try:
+            from nba_betting.features.availability import (
+                compute_availability_features, load_player_game_df,
+            )
+            _av = compute_availability_features(load_player_game_df())
+            missing_pct = {
+                (r.game_id, int(r.team_id)): float(r.missing_minutes_pct)
+                for r in _av.itertuples()
+            } if not _av.empty else {}
+        except Exception:
+            missing_pct = {}
 
         # Initialize all teams
         teams = session.execute(select(Team)).scalars().all()
@@ -291,6 +346,8 @@ def compute_all_elos() -> dict[int, float]:
             home_after, away_after = update_elo(
                 home_before, away_before, game.home_score, game.away_score,
                 home_rest_days=home_rest, away_rest_days=away_rest,
+                home_missing_pct=missing_pct.get((game.id, home_id)),
+                away_missing_pct=missing_pct.get((game.id, away_id)),
             )
             last_game_date[home_id] = game.date
             last_game_date[away_id] = game.date
