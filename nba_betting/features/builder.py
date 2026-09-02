@@ -14,7 +14,11 @@ from nba_betting.features.four_factors import (
     add_rolling_four_factors,
 )
 from nba_betting.features.rest_days import add_rest_features
-from nba_betting.models.elo import compute_all_elos, expected_score
+from nba_betting.models.elo import (
+    compute_all_elos,
+    predict_home_win_prob,
+    rest_elo_adjustment_vec,
+)
 from nba_betting.config import ELO_HOME_ADVANTAGE, INITIAL_ELO
 
 
@@ -329,10 +333,18 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     game_features["away_off_vs_home_def"] = (
         game_features["away_elo_off"] - game_features["home_elo_def"]
     )
-    # Vectorized Elo expected-score formula. Equivalent to applying
-    # expected_score row-by-row, but ~50x faster on the full matrix.
+    # Vectorized Elo expected-score formula — identical to
+    # models.elo.predict_home_win_prob (home advantage + back-to-back
+    # adjustment from the game's real rest profile) applied row-by-row, but
+    # ~50x faster on the full matrix. This column is the Elo model's
+    # prediction wherever it's consumed downstream (walk-forward OOF arrays,
+    # ensemble-weight learning, backtest), so it MUST match the live formula.
+    _rest_adj = rest_elo_adjustment_vec(
+        game_features["home_rest_days"], game_features["away_rest_days"],
+    )
     _elo_diff_for_prob = (
-        game_features["away_elo"] - (game_features["home_elo"] + ELO_HOME_ADVANTAGE)
+        game_features["away_elo"]
+        - (game_features["home_elo"] + ELO_HOME_ADVANTAGE + _rest_adj)
     )
     game_features["elo_home_prob"] = 1.0 / (1.0 + np.power(10.0, _elo_diff_for_prob / 400.0))
 
@@ -828,7 +840,8 @@ def build_prediction_features(
         "home_elo": home_elo,
         "away_elo": away_elo,
         "elo_diff": home_elo - away_elo,
-        "elo_home_prob": expected_score(home_elo + ELO_HOME_ADVANTAGE, away_elo),
+        # elo_home_prob is filled in below, once the rest profile is final
+        # (extra_features may override it with schedule-correct values).
         # Tier 1.3 — split Elo and matchup asymmetries.
         "home_elo_off": h_off,
         "away_elo_off": a_off,
@@ -927,6 +940,14 @@ def build_prediction_features(
     # Merge extra prediction-time features (player impact, line movement, etc.)
     if extra_features:
         row.update(extra_features)
+
+    # Elo prediction with the SAME formula as training's elo_home_prob
+    # column (home advantage + back-to-back adjustment), evaluated on the
+    # final rest values — after any schedule-correct override from
+    # extra_features (PredictionEngine injects those for upcoming games).
+    row["elo_home_prob"] = predict_home_win_prob(
+        home_elo, away_elo, row.get("home_rest_days"), row.get("away_rest_days"),
+    )
 
     df = pd.DataFrame([row])
 

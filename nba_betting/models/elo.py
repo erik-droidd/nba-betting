@@ -29,11 +29,14 @@ from datetime import date
 
 from sqlalchemy import select, func
 
+import numpy as np
+
 from nba_betting.config import (
     INITIAL_ELO,
     ELO_K_FACTOR,
     ELO_HOME_ADVANTAGE,
     ELO_CARRYOVER,
+    ELO_B2B_PENALTY,
 )
 from nba_betting.db.models import Game, Team, EloRating
 from nba_betting.db.session import get_session
@@ -42,6 +45,47 @@ from nba_betting.db.session import get_session
 def expected_score(elo_a: float, elo_b: float) -> float:
     """Probability that team A beats team B given their Elo ratings."""
     return 1.0 / (1.0 + 10.0 ** (-(elo_a - elo_b) / 400.0))
+
+
+def rest_elo_adjustment(
+    home_rest_days: float | None,
+    away_rest_days: float | None,
+) -> float:
+    """Elo points added to the HOME side for schedule context.
+
+    Only the back-to-back flag matters (``rest_days <= 1``, the same
+    definition ``features/rest_days.py`` uses): the home team on a b2b is
+    docked ``ELO_B2B_PENALTY``, the away team on a b2b hands the home side
+    the same amount. A replay sweep found a linear rest-days term adds
+    nothing beyond the flag. ``None`` on either side (rest unknown, e.g. the
+    Elo-only fallback with no schedule context) means no adjustment.
+    """
+    if home_rest_days is None or away_rest_days is None:
+        return 0.0
+    try:
+        h = float(home_rest_days)
+        a = float(away_rest_days)
+    except (TypeError, ValueError):
+        return 0.0
+    if h != h or a != a:  # NaN
+        return 0.0
+    adj = 0.0
+    if h <= 1:
+        adj -= ELO_B2B_PENALTY
+    if a <= 1:
+        adj += ELO_B2B_PENALTY
+    return adj
+
+
+def rest_elo_adjustment_vec(home_rest_days, away_rest_days) -> np.ndarray:
+    """Vectorized :func:`rest_elo_adjustment` for the training matrix.
+    NaN rest on either side -> 0 adjustment for that row."""
+    h = np.asarray(home_rest_days, dtype=float)
+    a = np.asarray(away_rest_days, dtype=float)
+    known = ~(np.isnan(h) | np.isnan(a))
+    adj = np.where(known & (h <= 1), -ELO_B2B_PENALTY, 0.0)
+    adj = adj + np.where(known & (a <= 1), ELO_B2B_PENALTY, 0.0)
+    return adj
 
 
 def mov_multiplier(mov: int, elo_winner: float, elo_loser: float) -> float:
@@ -62,10 +106,19 @@ def update_elo(
     home_score: int,
     away_score: int,
     k: float = ELO_K_FACTOR,
+    home_rest_days: float | None = None,
+    away_rest_days: float | None = None,
 ) -> tuple[float, float]:
-    """Update aggregate Elo ratings after a game. Returns (new_home_elo, new_away_elo)."""
-    # Home team gets advantage in prediction but not in rating update
-    home_expected = expected_score(home_elo + ELO_HOME_ADVANTAGE, away_elo)
+    """Update aggregate Elo ratings after a game. Returns (new_home_elo, new_away_elo).
+
+    The expectation includes home advantage AND the rest adjustment, so a
+    back-to-back loss costs less rating than a rested loss — schedule
+    effects stay out of the rating itself.
+    """
+    home_expected = expected_score(
+        home_elo + ELO_HOME_ADVANTAGE + rest_elo_adjustment(home_rest_days, away_rest_days),
+        away_elo,
+    )
     home_win = 1.0 if home_score > away_score else 0.0
     mov = abs(home_score - away_score)
 
@@ -146,9 +199,18 @@ def season_carryover(elo: float) -> float:
     return INITIAL_ELO + ELO_CARRYOVER * (elo - INITIAL_ELO)
 
 
-def predict_home_win_prob(home_elo: float, away_elo: float) -> float:
-    """Predict P(home win) including home-court advantage."""
-    return expected_score(home_elo + ELO_HOME_ADVANTAGE, away_elo)
+def predict_home_win_prob(
+    home_elo: float,
+    away_elo: float,
+    home_rest_days: float | None = None,
+    away_rest_days: float | None = None,
+) -> float:
+    """Predict P(home win) including home-court advantage and, when the
+    schedule context is supplied, the back-to-back adjustment."""
+    return expected_score(
+        home_elo + ELO_HOME_ADVANTAGE + rest_elo_adjustment(home_rest_days, away_rest_days),
+        away_elo,
+    )
 
 
 def compute_all_elos() -> dict[int, float]:
@@ -184,6 +246,10 @@ def compute_all_elos() -> dict[int, float]:
 
         # Track season transitions for carryover
         current_season = None
+        # Last completed-game date per team -> rest days for the b2b
+        # adjustment. Mirrors features/rest_days.add_rest_features: capped
+        # at 7, 3 when the team has no prior game, b2b = rest <= 1.
+        last_game_date: dict[int, date] = {}
 
         for game in games:
             # Apply carryover at season boundaries (to all three series)
@@ -214,9 +280,20 @@ def compute_all_elos() -> dict[int, float]:
             a_off_before = elos_off[away_id]
             a_def_before = elos_def[away_id]
 
-            home_after, away_after = update_elo(
-                home_before, away_before, game.home_score, game.away_score
+            home_rest = (
+                min((game.date - last_game_date[home_id]).days, 7)
+                if home_id in last_game_date else 3
             )
+            away_rest = (
+                min((game.date - last_game_date[away_id]).days, 7)
+                if away_id in last_game_date else 3
+            )
+            home_after, away_after = update_elo(
+                home_before, away_before, game.home_score, game.away_score,
+                home_rest_days=home_rest, away_rest_days=away_rest,
+            )
+            last_game_date[home_id] = game.date
+            last_game_date[away_id] = game.date
             (
                 h_off_after, h_def_after,
                 a_off_after, a_def_after,

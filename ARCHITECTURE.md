@@ -88,7 +88,10 @@ nba_betting/
 │                                 sync-players, serve, performance, elo
 ├── config.py                   — ALL tuning knobs + paths + constants
 │                                 (bankroll, Kelly, shrinkage λ, bet-side
-│                                 floor, Elo params, API URLs, team maps)
+│                                 floor, Elo params incl. ELO_B2B_PENALTY,
+│                                 API URLs, team maps). CURRENT_SEASON is
+│                                 derived by season_for_date(today) — rolls
+│                                 over July 1 — not a hardcoded string.
 │
 ├── db/
 │   ├── session.py              — SQLAlchemy session factory
@@ -131,6 +134,9 @@ nba_betting/
 │   ├── player_stats.py         — Roster + depth chart sync into PlayerStat.
 │   └── odds_tracker.py         — snapshot_current_odds / get_line_movement
 │                                 (opening-vs-current spread & prob).
+│                                 snapshot_game_date() is the ONE key
+│                                 (game's ET date = Game.date) used for
+│                                 filing and for every lookup.
 │                                 Auto-deduplicates: skips snapshot if
 │                                 prices moved < 0.5% within a 4h window.
 │
@@ -179,9 +185,10 @@ nba_betting/
 │
 ├── models/
 │   ├── elo.py                  — 538-style Elo with home advantage,
-│   │                              MOV multiplier (× opponent-strength
-│   │                              sigmoid), season carryover, and a
-│   │                              parallel off/def Elo split.
+│   │                              538 MOV multiplier, a back-to-back
+│   │                              penalty (rest_elo_adjustment, applied
+│   │                              in prediction AND update), season
+│   │                              carryover, and a parallel off/def split.
 │   │                              get_current_elos() and
 │   │                              get_current_off_def_elos() read the
 │   │                              latest EloRating rows per team.
@@ -558,8 +565,31 @@ ESPN sync + lineup bump adjustments.
   (eval on seasons 2–3, n=2630): removing it improves Elo Brier
   0.2149 → 0.2092, log-loss 0.6198 → 0.6055, ECE 0.0579 → 0.0143
   (paired t ≈ +4.7, consistent per-season). HA=40 re-validated as optimal.
+- **Back-to-back penalty `ELO_B2B_PENALTY = 25`** (added 2026-09). A team
+  on the second night of a back-to-back (`rest_days <= 1` — the same flag
+  `features/rest_days.py` computes) is docked 25 Elo points in BOTH the
+  prediction (`predict_home_win_prob(home, away, home_rest_days,
+  away_rest_days)`) and the rating update (`compute_all_elos()` threads
+  each team's real schedule rest into `update_elo`), so the rating itself
+  never absorbs a schedule effect. Full-history replay on 5 seasons (eval
+  2022-23..2025-26, n=5268): Brier 0.2152 → 0.2144, log-loss 0.6188 →
+  0.6169, paired t = +4.1; positive in 3 of 4 eval seasons (t +2.0..+3.4),
+  flat in 2025-26 (t ≈ 0), never negative. ≈3.6pp at parity, matching the
+  known NBA second-night effect. The same sweep re-confirmed K=20 and HA=40
+  as optimal, found carryover flat across 0.6-0.8, and showed a linear
+  rest-days term adds nothing beyond the flag. The training column
+  `elo_home_prob` (builder step 7, via `rest_elo_adjustment_vec`) and
+  `build_prediction_features` use the identical formula — the engine
+  injects schedule-correct rest before it is evaluated (§4.2) — so the OOF
+  arrays, the backtest's Elo proxy, and live predictions all agree.
 - Season carryover `ELO_CARRYOVER = 0.75` applied at the season boundary
   (`compute_all_elos()` detects season changes).
+- **History: 5 seasons since 2026-09** (2021-22 through 2025-26, 6,591
+  games; 2019-20 / 2020-21 deliberately excluded — bubble and no-fans
+  seasons distort home advantage). Home-win rates 54.8% / 58.1% / 54.7% /
+  54.6% / 55.6%. The extra history gives the walk-forward three real folds
+  (n=3948 OOF) instead of two, and better-initialised ratings entering
+  2023-24; it did NOT improve the GBM (§5.4).
 - `get_current_elos()` reads the latest `EloRating` per team.
 
 **Off/def Elo split** (`update_off_def_elo()`): alongside the aggregate
@@ -587,13 +617,29 @@ vectorized; for the live prediction it's called directly per-team.
   (`oof_elo_probs`, `oof_gbm_cal_probs`, `oof_y_true`) are returned for
   meta-learner fitting. Per-fold calibration defaults to **sigmoid**
   (isotonic over-extremizes on small fold slices — §5.3).
+- **`DEFAULT_PARAMS` are heavily regularized (2026-09)**: max_depth 3,
+  learning_rate 0.02, max_iter 200, min_samples_leaf 100, l2 10. The old
+  defaults (depth 4, lr 0.05, 300 iters, leaf 20, l2 1) overfit at this
+  sample size — a GBM trained on the single feature `elo_home_prob` scored
+  OOF Brier 0.2154 against 0.2096 for the Elo formula it was fed, i.e. the
+  trees were carving noise out of a 1-D monotone problem. Walk-forward OOF
+  (3 folds, n=3948, sigmoid per-fold calibration): GBM Brier 0.2198 →
+  0.2124, paired t = +6.1 vs the old defaults, better in every fold
+  (0.2234/0.2216/0.2145 → 0.2159/0.2138/0.2075). Every config in the
+  regularized region (depth 1-3, lr 0.02-0.05, 100-300 iters, leaf 50-150,
+  l2 5-20) lands within 0.001 Brier of the others, so the exact values are
+  not sensitive. The spread/total regression heads got the same treatment
+  (`spreads_totals.py`: walk-forward MAE 11.61 → 11.28 spread, t +6.4;
+  15.43 → 14.88 total, t +7.4).
 - **Hyperparameter grid search exists but is NOT wired into `train`**
   (`search_hyperparams()` / `save_best_hyperparams()` /
   `load_best_hyperparams()` currently have no callers; `train` uses
   `DEFAULT_PARAMS`). The GBM-rebuild investigation (#23) found
-  hyperparameter tuning lands within noise on this feature set, so
-  wiring it in was deliberately skipped. Re-evaluate alongside the
-  feature-maturation milestone, not before.
+  hyperparameter tuning lands within noise on this feature set — but that
+  comparison was GBM-vs-GBM inside the old, overfit region; the 2026-09
+  regularization above is decisively outside noise. The unwired grid now
+  spans the regularized region. Wiring it in is still unnecessary: the
+  whole region is flat.
 - **Temporal early-stopping split** (`train_model()`): when `_date` is
   present in X, uses a two-stage approach — fit a temporary model on the
   first 85% chronologically to find `n_iter_`, then retrain on all data
@@ -659,21 +705,28 @@ favorite" signal.
 predictions** (not the isotonic calibration slice — see §6.11).
 Persisted to `trained_models/ensemble_weight.joblib` and reloaded at
 prediction time (mtime-cached in-process — it's consulted on every
-ensemble prediction). Current learned value: **0.90 (Elo-dominant)** —
-after the 2026-07 MOV-dampening removal the Elo model improved to OOF
-Brier 0.2092 / ECE 0.0143 and earns most of the blend; w=0.9 still beats
-w=1.0 (OOF log-loss 0.6051 vs 0.6055), so the GBM remains a thin
-complement. The blended OOF log-loss improved 0.6182 → 0.6051 versus the
-pre-removal system on the same 2,630 games. (Pre-2026-07 value was 0.70;
-the §6.10 discussion below reflects the older system.) An earlier learned value of ~0.9 was an
-artifact of scoring the weight grid against per-fold-*isotonic* OOF GBM
-probs (log-loss 0.773 from over-extremization — §5.3); with honest
-sigmoid OOF probs (ll 0.629) the GBM earns 0.30. The weight-table is
-nearly flat from w=0.5–0.9 (ll 0.6193–0.6188), so the blend quality is
-unchanged — but the larger GBM share matters structurally: the GBM is
-the only model that consumes the injury / line-movement /
-player-availability features, so its share is the conduit through which
-the maturing live-data features reach production predictions.
+ensemble prediction). Current learned value: **0.80** (2026-09, after the Elo b2b adjustment,
+the regularized GBM and the 5-season history; OOF n=3948, 3 folds):
+log-loss w=0.7 0.6056, **w=0.8 0.6055**, w=0.9 0.6057, w=1.0 (pure Elo)
+0.6060. The blend is within noise of pure Elo (paired-Brier t ≈ +1). The
+GBM earns 0.20 because it is no longer a liability, not because it adds
+much: **on box-score features the GBM carries no information beyond
+Elo + rest.** A 2026-09 diagnostic pinned this from several directions —
+a GBM on `elo_home_prob` alone loses to the Elo formula (overfitting,
+fixed by regularization — §5.2); the regularized GBM on every feature
+subset (rest, off/def Elo, form, Four Factors, all diffs, everything)
+lands at Brier 0.2124-0.2134 vs Elo's 0.2096 (t ≈ -3); L2 logistic
+stackers on [elo_logit + 7 or 17 rest/form features] tie Elo exactly
+(0.2096-0.2097); and two extra seasons of history did not help the GBM
+(fold-3 Brier 0.2145 with 5 seasons vs 0.2121 with 3). The lever that
+remains is information Elo cannot see — injuries, lineups, the market —
+which only the live-data features carry (§4.10, §10.2). Its share still
+matters structurally: the GBM is the only model that consumes the
+injury / line-movement / player-availability features, so its share is
+the conduit through which the maturing live-data features reach
+production predictions. (History: 0.90 after the 2026-07 MOV-dampening
+removal; 0.70 in 2026-06 once per-fold calibration was fixed to sigmoid;
+0.30 before §6.11 — that value was an in-sample artifact.)
 
 > **Can the GBM be made to pull more weight?** Investigated thoroughly
 > (issue #23): regularization (shallower/fewer trees, higher `l2`,
@@ -1082,6 +1135,8 @@ Everything worth tuning is in one file. The most impactful knobs:
 | `ELO_K_FACTOR` | `20.0` | Elo update speed |
 | `ELO_HOME_ADVANTAGE` | `40.0` | Home bonus in Elo points — calibrated to the modern ~55% home-win rate, not the 538 default of 100. See §6.10 |
 | `ELO_CARRYOVER` | `0.75` | Season-to-season Elo persistence |
+| `ELO_B2B_PENALTY` | `25.0` | Second-night-of-a-back-to-back penalty in Elo points, applied in prediction AND rating update. See §5.1 |
+| `CURRENT_SEASON` | derived | `season_for_date(today)` — rolls over July 1, so `sync` follows the league without an annual edit |
 | `NBA_API_DELAY_SECONDS` | `1.5` | NBA.com rate limit (reduced from 2.5) |
 | `ESPN_API_DELAY_SECONDS` | `0.8` | ESPN rate limit (reduced from 1.5) |
 
@@ -1098,7 +1153,7 @@ from nba_betting.features.builder import build_feature_matrix
 X, y = build_feature_matrix()
 print(X.shape, 'NaN?', X.isna().any().any())
 "
-# Expect: ~(3500+, 92), NaN? False
+# Expect: ~(6500+, 98), NaN? False  (5 seasons synced)
 
 # 2. Scalar and vectorized Pythagorean agree
 .venv/bin/python3 -c "
@@ -1119,19 +1174,19 @@ print('OK')
 
 # 5. Walk-forward still in the expected range
 .venv/bin/python3 -m nba_betting train
-# Expect: GBM-only WF accuracy 63-65%, Brier ~0.225, calibrated ECE < 0.02.
-# NOTE: this table is the GBM alone — it understates the system because
-# `elo_diff` (its top feature) is HA-invariant. The *ensemble* the live
-# `predict` uses scores ~66-67% accuracy / ~0.213 Brier on the same OOF
-# (see §6.10). New features (EWM, SOS-adj, pace, off/def Elo) should
-# appear in top-10 permutation importance.
+# Expect (2026-09, 3 folds, n≈3950): GBM-only WF accuracy ~66%, Brier
+# ~0.213, log-loss ~0.615; "Elo (out-of-fold)" Brier ~0.210 / ECE < 0.01;
+# "GBM (out-of-fold)" Brier ~0.212; learned Elo weight 0.7-0.9. The blend
+# is within noise of pure Elo (§5.4) — a GBM table materially WORSE than
+# ~0.215 Brier means the regularization regressed. `elo_home_prob` should
+# dominate permutation importance, with diff_net_rtg_game_ewm_10 second.
 
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (102 tests across eight files).
+# 7. Full test suite (114 tests across ten files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 102 passed in < 5s.
+# Expect: 114 passed in < 5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
@@ -1144,8 +1199,14 @@ print('OK')
 # test_playoff_sync_and_resolve.py — 11 tests (play-in/playoff sync,
 #   update_results matching, record_predictions ET-date filing)
 # test_simulate_horizon.py   —  8 tests (data-driven horizon, density scaling)
-# test_rest_features.py      —  4 tests (vectorized rest/b2b/window counts
-#   pinned against a frozen copy of the original O(n²) loop)
+# test_rest_features.py      —  7 tests (vectorized rest/b2b/window counts
+#   pinned against a frozen copy of the original O(n²) loop; upcoming-game
+#   rest equivalence)
+# test_elo_rest.py           —  6 tests (Elo b2b adjustment: scalar/vector
+#   helpers, prediction + update, compute_all_elos threads schedule rest,
+#   build_prediction_features uses the FINAL rest values)
+# test_season_and_snapshot_dates.py — 3 tests (season_for_date rollover,
+#   snapshot_game_date ET keying)
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -1653,3 +1714,58 @@ substantive changes, each empirically gated; artifacts retrained.
   per-player stats source before the player-impact block can matter.
 - The API predict route reads `injuries.json` without syncing ESPN first
   (CLI syncs); acceptable divergence while the API is for local use.
+
+### 10.1g Accuracy review pass (2026-09)
+
+Whole-solution review with the explicit goal of prediction accuracy. Every
+model change below was gated by a paired significance test on held-out
+games; artifacts retrained; harnesses re-run (§8).
+
+**Data:** synced 2021-22 and 2022-23 (5 seasons, 6,591 games). The
+walk-forward now has three real folds (n=3948 OOF). 2019-20/2020-21 are
+deliberately excluded (bubble / no-fans home advantage).
+
+**Methodology:**
+
+- **Back-to-back penalty in Elo** (`ELO_B2B_PENALTY = 25`, §5.1) — the one
+  change that is significantly better than the prior system on the Elo
+  path that carries 80-90% of every prediction: replay Brier 0.2152 →
+  0.2144 / log-loss 0.6188 → 0.6169 on n=5268, paired t = +4.1, positive
+  in 3 of 4 seasons and never negative. K=20, HA=40 re-confirmed optimal;
+  carryover flat; linear rest adds nothing beyond the b2b flag.
+- **Regularized GBM** (§5.2): OOF Brier 0.2198 → 0.2124, t = +6.1, every
+  fold. Same for the spread/total heads (t +6.4 / +7.4). The blend moves
+  from w_elo 0.90 to 0.80 and is within noise of pure Elo either way.
+- **Negative results, recorded so they aren't re-run:** GBM on any feature
+  subset, L2 logistic stackers on Elo + rest/form features, and more
+  training history all land within noise of Elo (§5.4). On box-score
+  features the ceiling is Elo + rest; further gains need information Elo
+  can't see (injuries with real per-player minutes, lineups, market).
+
+**Bugs fixed:**
+
+- `CURRENT_SEASON` was a hardcoded `"2025-26"` — `sync` would have
+  silently stopped following the league at the 2026-27 tip-off. Now
+  `season_for_date(today)`, rolling over July 1 (`config.py`).
+- Predict-time odds snapshots were filed under the **UTC** date prefix of
+  `game_time_utc` while every consumer (`Game.date`, `get_closing_line`,
+  the tracker's per-game date, the JSONL importer) keys on the **ET**
+  date, so late tip-offs (≥ 8 PM ET) landed a day late and never joined
+  (18 mismatched rows in the DB). `odds_tracker.snapshot_game_date()` is
+  now the single key used by `snapshot_current_odds`, `cli.predict`, and
+  `api/routes.py`.
+- `record_predictions` looked up the opening line under the
+  prediction-run date instead of the game's date, so upcoming-slate and
+  late-game bets never got an opening price — CLV coverage sat at 13 of
+  83 bets. Now keyed by `rec.game_date`.
+- Snapshots captured before their game existed in `games` could never be
+  attached (the importer resolves at import time only; 85 orphaned rows).
+  `sync` now calls `reresolve_existing_snapshots(only_unmatched=True)`
+  after adding games; a one-time full re-resolve attached 139 rows (45
+  remain unjoinable — games that were scheduled but never played).
+
+**Verification (post-change):** 114 tests pass; `train` WF 66.2% /
+0.2129 / 0.6149; Elo OOF Brier 0.2096, ECE 0.0074; w_elo 0.80;
+`predict-path-eval` n=1315: correct-vs-live t = +0.33 (no fix), fresh-rest
+t = +0.45; Elo-proxy backtest ROI +4.1% over 2284 bets (upper bound, §6.6);
+real-odds backtest coverage still 3% (124 games) — not yet informative.

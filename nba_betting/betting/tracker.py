@@ -83,6 +83,10 @@ def record_predictions(recommendations) -> int:
     existing_keys = {(r.date, r.home_team, r.away_team) for r in history}
 
     # Fetch opening lines from snapshots for CLV tracking (best-effort).
+    # Keyed by each rec's GAME date (ET) — the key snapshots are filed
+    # under — not the prediction-run date: an upcoming-slate prediction
+    # (or any late tip-off) would otherwise never find its opening line,
+    # which is why CLV coverage sat at ~20% of bets.
     opening_probs: dict[tuple[str, str], float] = {}
     try:
         from nba_betting.data.odds_tracker import get_opening_line
@@ -97,10 +101,19 @@ def record_predictions(recommendations) -> int:
         for rec in recommendations:
             h_id = _teams.get(rec.home_team)
             a_id = _teams.get(rec.away_team)
-            if h_id and a_id:
-                opening = get_opening_line(today_date, h_id, a_id)
-                if opening and opening.get("home_prob"):
-                    opening_probs[(rec.home_team, rec.away_team)] = opening["home_prob"]
+            if not (h_id and a_id):
+                continue
+            rec_game_date = getattr(rec, "game_date", None)
+            try:
+                lookup_date = (
+                    datetime.strptime(rec_game_date, "%Y-%m-%d").date()
+                    if rec_game_date else today_date
+                )
+            except (TypeError, ValueError):
+                lookup_date = today_date
+            opening = get_opening_line(lookup_date, h_id, a_id)
+            if opening and opening.get("home_prob"):
+                opening_probs[(rec.home_team, rec.away_team)] = opening["home_prob"]
     except Exception:
         pass  # CLV is non-critical
 

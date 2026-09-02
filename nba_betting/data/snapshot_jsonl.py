@@ -79,16 +79,26 @@ def _resolve_game_for_snapshot(session, home_id, away_id, anchor_date):
     return cands[-1]                # only past-in-window (UTC-late tip): nearest
 
 
-def reresolve_existing_snapshots() -> dict:
-    """One-time migration: re-derive ``game_date`` + ``game_id`` for every
-    stored snapshot via :func:`_resolve_game_for_snapshot`, fixing rows
-    imported under the old capture/UTC-date logic (which misfiled pre-tipoff
-    snapshots by 1-2 days, so they never joined a game). Idempotent —
-    re-running once correct is a no-op. Returns ``{total, updated, unmatched}``.
+def reresolve_existing_snapshots(only_unmatched: bool = False) -> dict:
+    """Re-derive ``game_date`` + ``game_id`` for stored snapshots via
+    :func:`_resolve_game_for_snapshot`.
+
+    Originally a one-time migration for rows imported under the old
+    capture/UTC-date logic (which misfiled pre-tipoff snapshots by 1-2 days,
+    so they never joined a game). It is also needed on an ongoing basis:
+    snapshots are captured *before* a game exists in the ``games`` table
+    (``sync`` only stores completed games), so the importer cannot resolve
+    them at import time and leaves ``game_id`` NULL. ``sync`` therefore
+    calls this with ``only_unmatched=True`` after adding new games, which
+    revisits just the rows that still lack a ``game_id``. Idempotent.
+    Returns ``{total, updated, unmatched}``.
     """
     session = get_session()
     try:
-        rows = session.execute(select(OddsSnapshot)).scalars().all()
+        query = select(OddsSnapshot)
+        if only_unmatched:
+            query = query.where(OddsSnapshot.game_id.is_(None))
+        rows = session.execute(query).scalars().all()
         updated = 0
         unmatched = 0
         for r in rows:

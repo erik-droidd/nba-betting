@@ -23,14 +23,30 @@ MODEL_PATH = MODELS_DIR / "gbm_latest.joblib"
 FEATURE_COLS_PATH = MODELS_DIR / "feature_cols.joblib"
 FEATURE_MEANS_PATH = MODELS_DIR / "feature_means.joblib"
 
-# Default hyperparameters
+# Default hyperparameters — deliberately heavily regularized (2026-09).
+#
+# The previous defaults (max_depth 4, lr 0.05, 300 iters, min_samples_leaf
+# 20, l2 1.0) overfit badly at this sample size: a GBM trained on the
+# single feature `elo_home_prob` scored OOF Brier 0.2154 against 0.2096 for
+# the Elo formula it was fed — i.e. the trees were carving noise out of a
+# 1-D monotone problem. On the full feature set the walk-forward OOF GBM
+# (3 folds, n=3948, sigmoid-calibrated) moved 0.2198 -> 0.2124 Brier with
+# these settings, paired t = +6.1 vs the old defaults, better in every fold
+# (0.2234/0.2216/0.2145 -> 0.2159/0.2138/0.2075). Every regularized config
+# in the grid (depth 1-3, lr 0.02-0.05, 100-300 iters, min_samples_leaf
+# 50-150, l2 5-20) landed within 0.001 Brier of each other, so the exact
+# values are not sensitive. The Elo+GBM blend itself is within noise of
+# pure Elo either way (the GBM adds no information beyond Elo + rest on
+# box-score features — see ARCHITECTURE §5.4); the win is a GBM that is no
+# longer a liability for the `--model xgb` path, driver attribution, and
+# the conduit for the live-data features.
 DEFAULT_PARAMS = {
-    "max_iter": 300,
-    "max_depth": 4,
-    "learning_rate": 0.05,
+    "max_iter": 200,
+    "max_depth": 3,
+    "learning_rate": 0.02,
     "max_leaf_nodes": 31,
-    "min_samples_leaf": 20,
-    "l2_regularization": 1.0,
+    "min_samples_leaf": 100,
+    "l2_regularization": 10.0,
     "random_state": 42,
     "verbose": 0,
     "early_stopping": True,
@@ -311,17 +327,20 @@ def search_hyperparams(
         subsequent ``train_model`` calls pick them up.
     """
     if grid is None:
-        # Compact grid spanning depth / LR / iter / regularization. All
-        # combos produce models in ~15 seconds each on the full history.
+        # Compact grid spanning the REGULARIZED region around DEFAULT_PARAMS
+        # (2026-09). The previous grid lived entirely in the overfit region
+        # (depth 4-5, lr 0.05-0.08, leaf 20, l2 <= 2) where every candidate
+        # lost ~0.007 Brier to these; see the DEFAULT_PARAMS note. All combos
+        # train in a few seconds each on the full history.
         grid = [
-            {"max_depth": 3, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
-            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
-            {"max_depth": 5, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 1.0},
-            {"max_depth": 4, "learning_rate": 0.03, "max_iter": 500, "l2_regularization": 1.0},
-            {"max_depth": 4, "learning_rate": 0.08, "max_iter": 200, "l2_regularization": 1.0},
-            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 0.5},
-            {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "l2_regularization": 2.0},
-            {"max_depth": 3, "learning_rate": 0.08, "max_iter": 200, "l2_regularization": 0.5},
+            {"max_depth": 3, "learning_rate": 0.02, "max_iter": 200, "min_samples_leaf": 100, "l2_regularization": 10.0},
+            {"max_depth": 2, "learning_rate": 0.03, "max_iter": 150, "min_samples_leaf": 80, "l2_regularization": 10.0},
+            {"max_depth": 2, "learning_rate": 0.03, "max_iter": 200, "min_samples_leaf": 100, "l2_regularization": 10.0},
+            {"max_depth": 3, "learning_rate": 0.03, "max_iter": 200, "min_samples_leaf": 50, "l2_regularization": 5.0},
+            {"max_depth": 1, "learning_rate": 0.05, "max_iter": 200, "min_samples_leaf": 100, "l2_regularization": 10.0},
+            {"max_depth": 2, "learning_rate": 0.05, "max_iter": 100, "min_samples_leaf": 100, "l2_regularization": 10.0},
+            {"max_depth": 2, "learning_rate": 0.03, "max_iter": 150, "min_samples_leaf": 150, "l2_regularization": 20.0},
+            {"max_depth": 3, "learning_rate": 0.02, "max_iter": 300, "min_samples_leaf": 100, "l2_regularization": 10.0},
         ]
 
     results = []
