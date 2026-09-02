@@ -129,6 +129,16 @@ jobs:
           echo "day=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
           echo "stamp=$(date -u +'%Y-%m-%d %H:%MZ')" >> "$GITHUB_OUTPUT"
 
+      - name: Capture injuries to JSONL
+        # Daily ESPN injury report -> data/injury_snapshots/<ET-date>.jsonl
+        # (latest capture of the day wins; untouched if unchanged). This is
+        # what grows `historical_injuries` — the training-side injury
+        # features — without the user running `predict`. Never blocks the
+        # odds snapshot: failures are logged and the step succeeds.
+        run: |
+          python -m nba_betting snapshot-injuries --jsonl data/injury_snapshots \
+            || echo "snapshot-injuries failed (non-fatal)"
+
       - name: Commit & push
         env:
           DAY: ${{ steps.capture.outputs.day }}
@@ -138,14 +148,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # If snapshot-odds wrote nothing (no games / network failure),
-          # don't commit — keeps history clean and avoids empty pushes.
-          if [ -z "$(git status --porcelain data/odds_snapshots/)" ]; then
+          # If neither capture wrote anything (no games / network failure /
+          # unchanged injury list), don't commit — keeps history clean and
+          # avoids empty pushes.
+          if [ -z "$(git status --porcelain data/odds_snapshots/ data/injury_snapshots/)" ]; then
             echo "no new snapshot data; nothing to commit"
             exit 0
           fi
 
-          git add "data/odds_snapshots/${DAY}.jsonl"
+          # Odds file is UTC-dated, injury file is ET-dated: add both dirs
+          # rather than guessing filenames.
+          git add data/odds_snapshots/ data/injury_snapshots/
           # [skip ci] prevents the push from retriggering this workflow.
           git commit -m "chore(snapshots): ${STAMP} [skip ci]"
 

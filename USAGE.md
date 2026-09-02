@@ -248,6 +248,17 @@ See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) t
 
 > **⚠️ GitHub's 60-day inactivity rule:** scheduled workflows are automatically disabled if the repo has no new commits for 60 days. The NBA offseason (June–October) exceeds this. **First action each October**: visit the Actions tab and re-enable the `snapshot-odds` workflow, then trigger a manual run to verify. The workflow itself commits daily during the season, so mid-season deactivation shouldn't happen.
 
+#### Daily Injury Snapshots (same cron)
+
+The same workflow also runs `snapshot-injuries --jsonl data/injury_snapshots` on every firing. It writes the **full ESPN injury list** for the NBA (ET) day to `data/injury_snapshots/<date>.jsonl` — the latest capture of the day wins, and the file is left untouched (no commit) when nothing changed. This is what grows the `historical_injuries` table, which is the training-side source of the `injury_impact_*` features; before this, those rows were only written when you personally ran `predict`.
+
+`import-snapshots` (with or without `--pull`) loads the injury files too, replacing each day's rows in `historical_injuries` (idempotent). To capture locally instead of via GitHub:
+
+```bash
+python3 -m nba_betting snapshot-injuries            # refresh injuries.json + today's historical_injuries rows
+python3 -m nba_betting snapshot-injuries --jsonl data/injury_snapshots   # DB-free file mode
+```
+
 ### Step 3: Place Bets
 
 Use the recommendations to place bets on Polymarket or your preferred platform. The system recommends quarter-Kelly sizing (conservative) with a 5% max per bet and 25% max total exposure.
@@ -479,7 +490,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Daily (morning) | `sync` | Get yesterday's results, update Elo |
 | Before games | `predict` | Get today's recommendations |
 | Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron (or GitHub Actions — see §Step 2b) |
-| Daily (morning, EU users) | `import-snapshots --pull` | Git-pull + load JSONL snapshots written overnight by GitHub Actions |
+| Daily (morning, EU users) | `import-snapshots --pull` | Git-pull + load the odds AND injury JSONL snapshots written overnight by GitHub Actions |
 | After games | `sync` then `performance` | Check results and accuracy |
 | After games | `clv` | Review Closing Line Value skill metric |
 | Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
@@ -538,8 +549,9 @@ python3 -m nba_betting predict                   # Today's recommendations + exp
 python3 -m nba_betting predict --bankroll 5000   # Custom bankroll
 python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on a cron)
 python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, for GitHub Actions
-python3 -m nba_betting import-snapshots --pull   # Git-pull + load JSONL snapshots from GH Actions (daily)
+python3 -m nba_betting import-snapshots --pull   # Git-pull + load odds + injury JSONL snapshots from GH Actions (daily)
 python3 -m nba_betting import-snapshots          # Same, but without the git pull step
+python3 -m nba_betting snapshot-injuries         # Today's ESPN injury list -> historical_injuries (or --jsonl DIR for file mode)
 
 # Backtesting (four modes)
 python3 -m nba_betting backtest                              # Pure model benchmark (no market odds)
