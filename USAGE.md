@@ -26,7 +26,7 @@ python3 -m nba_betting sync --seasons 5
 ```
 
 This will:
-- Download team box scores for the last 3 seasons
+- Download team box scores AND player game logs for the last 5 seasons
 - Store them in `data/nba_betting.db` (SQLite)
 - Compute Elo ratings for all 30 teams
 - Auto-resolve any pending predictions from previous runs
@@ -49,13 +49,13 @@ This will:
 
 **Expected output** (5 seasons + player logs synced, 3 walk-forward folds): ~67% walk-forward accuracy on the GBM-only table, Brier ~0.212, log-loss ~0.612; the "Elo (out-of-fold)" line should read Brier ~0.208 with ECE below 0.01, and the learned Elo weight 0.8-0.9. The blended ensemble that `predict` uses is within noise of the Elo model alone — on box-score features the Elo rating (with its home-court and back-to-back adjustments) already captures the available signal; the GBM's share is mainly the conduit for the live injury / line-movement features (ARCHITECTURE §5.4).
 
-### 4. Sync Player Rosters (Optional, Improves Predictions)
+### 4. Sync Player Rosters (Optional, not on the prediction path)
 
 ```bash
 python3 -m nba_betting sync-players
 ```
 
-Fetches rosters and depth charts from ESPN for all 30 teams. Used for injury impact estimation. Rate-limited, takes ~2 minutes.
+Fetches rosters and depth charts from ESPN for all 30 teams into the `player_stats` table. Since 2026-09 predictions do **not** read it: player availability comes from the NBA player game logs that `sync` loads, and injury impact ratings come straight from ESPN depth charts during the injury sync. Keep it only if you want roster data in the DB for your own analysis. Rate-limited, takes ~2 minutes.
 
 ---
 
@@ -84,8 +84,8 @@ This is the main command. It will:
 4. Fetch market odds from Polymarket (filters out closed/resolved markets) and ESPN/DraftKings as fallback
 5. Snapshot odds for line movement tracking
 6. Run the ensemble model (Elo + calibrated GBM, blended in **log-odds space** with a weight learned during training; stacked meta-learner used when available)
-7. **Apply injury adjustments** to the raw model probability (each injured player reduces team strength based on their impact rating)
-8. **Bayesian-shrink** the injury-adjusted model probability toward the market log-odds (λ = 0.6 by default — market-leaning). This is the single biggest change to how the system filters bets: small model-vs-market disagreements get pulled back to the market, and only decisive conviction survives.
+7. **Account for who is out** inside the model itself: the Elo rating carries a back-to-back term and an availability term (share of each team's regular-rotation minutes expected to be missing, from the ESPN injury list matched to the player game logs), and the GBM sees the same availability features. The old heuristic injury shift is shown for reference but no longer applied.
+8. **Bayesian-shrink** the model probability toward the market log-odds (λ = 0.6 by default — market-leaning). This is the single biggest change to how the system filters bets: small model-vs-market disagreements get pulled back to the market, and only decisive conviction survives.
 9. Compute edge against the **shrunken** probability (not the raw model) — so model%, market%, and edge% reconcile exactly in the UI
 10. Apply the **asymmetric bet-side floor** (`MIN_BET_SIDE_PROB = 0.30`): the system refuses to bet a team the model itself only gives a <30% chance of winning, even if the edge math looks positive. This kills "lottery-ticket" bets where positive EV depends on a tail price the model isn't really contradicting.
 11. Size bets using **signal-dependent quarter-Kelly** (fraction scales with edge magnitude) and **slate-level portfolio Kelly**: when multiple positive-EV bets exist, `optimize_slate()` runs a SLSQP joint optimization with a Gaussian copula correlation matrix to maximize expected log-bankroll across the full slate, enforcing per-bet (5%) and total-exposure (25%) caps; falls back to proportional per-bet Kelly when the optimizer fails or only one bet qualifies
@@ -167,14 +167,9 @@ Even with positive-EV edge math, the system refuses to bet a side the model itse
 
 With shrinkage + floor, the system now produces **far fewer** SUSPECT badges and much smaller daily exposure. On a recent 15-game slate the counts went from 12 SUSPECT / 14 actionable / $700 exposure → 1 SUSPECT / 4 actionable / $119 exposure.
 
-**About injury adjustments:**
+**About injuries:**
 
-The model itself was trained only on team-level historical stats — it has no awareness of who's playing tonight. To compensate, the system applies a post-hoc adjustment based on the current ESPN injury report:
-- A starter (impact 7) being **Out** lowers their team's win probability by ~4%
-- A star (impact 8-10) being **Out** lowers it by ~5-6%
-- A team's total injury hit is capped at -15%
-
-This adjustment is applied **before** edge is computed, so the Model column already reflects today's injuries. If you see the explanation mention an injury, that injury has already been factored into the displayed probability.
+Availability is modelled inside the prediction, not bolted on afterwards. Each team's current rotation (regulars and their typical minutes, from the player game logs) is matched to the ESPN injury report; the expected share of missing rotation minutes lowers that team's Elo (`ELO_AVAILABILITY_SCALE`, about 3 points of win probability for a star) and feeds the GBM's availability features, which were trained on five seasons of real "who did not play" history. The `home_injury_adj` / `away_injury_adj` values you may see in the API are the old heuristic estimate and are display-only (`APPLY_POST_HOC_INJURY_ADJUSTMENT = False`). Two things to know: a player who missed the entire prior stretch is not a "regular", so listing him changes nothing (the team's rating already reflects his absence); and for the first ~5 games of a season the regulars come from last season's final games, so the term is weak until the new rotation has played.
 
 **Options**:
 ```bash
@@ -410,7 +405,7 @@ Checks:
 python3 -m nba_betting readiness-status
 ```
 
-Reports how many days of injury and odds-snapshot data have accumulated. The player-impact and line-movement features are forward-accumulating — they start at zero and become meaningful only after enough live-season data exists. Use this command monthly to know when it's worth retraining:
+Reports how many days of injury and odds-snapshot data have accumulated. The `injury_impact_*` and line-movement features are forward-accumulating — they start at zero and become meaningful only after enough live-season data exists (the player-availability features are different: they are real for every historical game since 2026-09). Use this command monthly to know when it's worth retraining:
 
 | Status | Injury days | Snapshot days | Meaning |
 |--------|:-----------:|:-------------:|---------|
@@ -513,7 +508,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 ## Data Flow
 
 ```
-NBA.com (game stats) ──┐
+NBA.com (team + player game logs) ──┐
                        ├──> SQLite DB ──> Feature Matrix ──> GBM Model ─┐
 ESPN (injuries,        │                                                 │
   odds, depth charts) ─┘                                                 │
@@ -528,18 +523,22 @@ ESPN/DraftKings (odds) ────> Fallback Prices + Spread/O/U ────�
 
 ```
 data/
-  nba_betting.db          # SQLite database (games, stats, Elo, player stats, odds)
+  nba_betting.db          # SQLite database (games, team + player game logs, Elo, odds, injury history)
+  injury_snapshots/       # Daily ESPN injury JSONL from the GitHub Actions cron (committed)
+  odds_snapshots/         # Odds JSONL from the cron (committed)
   prediction_history.json # Prediction tracking for performance analysis
   injuries.json           # Current injury list (ESPN + manual overrides)
 
 trained_models/
   gbm_latest.joblib         # Trained GBM base model
-  calibrated_model.joblib   # Isotonic-calibrated model (wraps the base)
+  gbm_calibrated.joblib     # Isotonic-calibrated model (wraps the base) — what predict runs
   feature_cols.joblib       # Feature column order
   feature_means.joblib      # Training means for NaN imputation
-  ensemble_weight.joblib    # Grid-searched optimal Elo weight for log-odds blend
-  best_params.joblib        # Best hyperparameters found during per-fold grid search
-  ensemble_meta.joblib      # Stacked logistic meta-learner (present after sufficient WF data)
+  ensemble_weight.joblib    # Out-of-fold-learned Elo weight for the log-odds blend
+  ensemble_meta.joblib      # Stacked logistic meta-learner (fitted, not wired into predict)
+  spread_regressor.joblib   # Margin regression head
+  total_regressor.joblib    # Total regression head
+  regressor_feature_cols.joblib
 ```
 
 ---

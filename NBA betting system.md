@@ -1,3 +1,5 @@
+> **Status (2026-09): historical design spec.** This is the original research write-up the system was built from (2026-05). The implementation has since diverged in places — e.g. the Elo carries back-to-back and player-availability terms, the GBM is heavily regularized and within noise of pure Elo, and player props are out of scope. **`ARCHITECTURE.md` is the source of truth** for how the system actually works; `USAGE.md` for how to run it.
+
 # Data-Driven NBA Prediction and Polymarket Betting System
 
 ## 1. Introduction: sports betting as quantitative finance

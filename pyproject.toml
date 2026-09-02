@@ -1,6 +1,6 @@
 [project]
 name = "nba-betting"
-version = "0.2.0"
+version = "0.3.0"
 description = "NBA game prediction and Polymarket betting system with Elo + GBM ensemble"
 requires-python = ">=3.9"
 dependencies = [
