@@ -26,8 +26,8 @@ reintroduce.
                     ▼                   ▼                    ▼
              ┌───────────────────────────────────────────────────────┐
   STORAGE    │  SQLite (data/nba_betting.db)                         │
-             │  tables: teams, games, game_stats, elo_ratings,       │
-             │  player_stats, odds_snapshots                         │
+             │  tables: teams, games, game_stats, player_game_stats, │
+             │  elo_ratings, odds_snapshots, historical_injuries     │
              │  + JSON: data/injuries.json, prediction_history.json  │
              └───────────────────────────┬───────────────────────────┘
                                          │
@@ -35,23 +35,24 @@ reintroduce.
              ┌───────────────────────────────────────────────────────┐
   FEATURES   │  compute_rolling_features → add_four_factors →       │
              │  add_rest_features → build_feature_matrix             │
-             │  (~92 diff-features: rolling stats, SOS-adjusted      │
+             │  (~98 features: rolling stats, SOS-adjusted           │
              │   net rating, pace/poss, EWM, off/def Elo — all       │
              │   computed with shift(1) to prevent temporal leakage) │
              └───────────────────────────┬───────────────────────────┘
                                          │
                                          ▼
              ┌───────────────────────────────────────────────────────┐
-  MODELS     │  Elo (+ off/def split) + HistGradientBoosting        │
-             │          (calibrated isotonic, per-fold grid search)  │
+  MODELS     │  Elo (+HA, +b2b, +availability; off/def split)       │
+             │  + HistGradientBoosting (regularized, isotonic-cal.)  │
              │          │                                            │
              │          └─> meta-learner → log-odds ensemble fallback│
              └───────────────────────────┬───────────────────────────┘
                                          │  p_model
                                          ▼
              ┌───────────────────────────────────────────────────────┐
-  INJURY     │  net_adjust = home_impact - away_impact               │
-  ADJUST     │  p_model ← clip(p_model + net_adjust, 0.01, 0.99)     │
+  INJURIES   │  availability enters the model itself: Elo term      │
+             │  (−150·Δmissing_pct) + GBM availability features;     │
+             │  heuristic ±impact shift is DISPLAY-ONLY (§10.1g)     │
              └───────────────────────────┬───────────────────────────┘
                                          │
                                          ▼
@@ -96,7 +97,9 @@ nba_betting/
 ├── db/
 │   ├── session.py              — SQLAlchemy session factory
 │   └── models.py               — Team, Game, GameStats, EloRating,
-│                                 PlayerStat, OddsSnapshot tables
+│                                 PlayerGameStat (player game logs),
+│                                 PlayerStat (legacy rosters),
+│                                 OddsSnapshot, HistoricalInjury tables
 │
 ├── data/
 │   ├── nba_stats.py            — NBA.com client (ScoreboardV3 + LeagueGameLog,
@@ -133,7 +136,10 @@ nba_betting/
 │   │                              apply_lineup_bumps() raises impact rating
 │   │                              for starter-tier players absent from the
 │   │                              published lineup (surprise DNPs).
-│   ├── player_stats.py         — Roster + depth chart sync into PlayerStat.
+│   ├── player_stats.py         — Roster + depth chart sync into PlayerStat
+│   │                              (`sync-players`). NOT on the prediction
+│   │                              path since 2026-09 — availability comes
+│   │                              from player_game_stats (§4.10).
 │   └── odds_tracker.py         — snapshot_current_odds / get_line_movement
 │                                 (opening-vs-current spread & prob).
 │                                 snapshot_game_date() is the ONE key
@@ -216,9 +222,9 @@ nba_betting/
 │   │                              Saves/loads (estimator, feature_cols).
 │   │                              Also persists feature_means for NaN
 │   │                              imputation at prediction time.
-│   │                              Per-fold hyperparameter grid search
-│   │                              (max_depth/lr/iter/l2); best params
-│   │                              saved to best_params.joblib.
+│   │                              Heavily regularized DEFAULT_PARAMS (§5.2);
+│   │                              a hyperparameter grid search exists but
+│   │                              is unwired (flat region — §5.2).
 │   │                              Mtime-keyed in-process model cache.
 │   ├── calibration.py          — Isotonic calibration via
 │   │                              CalibratedClassifierCV(cv="prefit").
@@ -307,11 +313,15 @@ data/
   injuries.json             Current injury overrides
   prediction_history.json   Resolved bets + pending predictions
 trained_models/
-  gbm_latest.joblib         (base_estimator, feature_cols)
-  calibrated_model.joblib   Isotonic wrapper
+  gbm_latest.joblib         base estimator
+  gbm_calibrated.joblib     Isotonic wrapper (the model `predict` runs)
   feature_cols.joblib       Column order for imputation
   feature_means.joblib      Training-set means for NaN imputation
-  ensemble_weight.joblib    Grid-searched optimal Elo weight
+  ensemble_weight.joblib    OOF-learned Elo weight for the log-odds blend
+  ensemble_meta.joblib      Stacked meta-learner (fitted, not wired — §5.4)
+  spread_regressor.joblib / total_regressor.joblib / regressor_feature_cols.joblib
+data/injury_snapshots/      Daily ESPN injury JSONL from the cron (committed)
+data/odds_snapshots/        Odds JSONL from the cron (committed)
 frontend/
   index.html                Single-file dashboard, fetches /api/*
 USAGE.md                    End-user facing operational guide
@@ -335,25 +345,31 @@ or module you can `grep` for.
    walks forward from `today_et + 1` and returns the next available slate.
 4. **`get_current_elos()`** (`models/elo.py`) loads `{team_id → elo}` from
    the `teams` table.
-5. **Model loading**:
-   - Try `load_calibrated_model()` → returns the isotonic wrapper.
-   - Load `(base_estimator, feature_cols) = load_model()` — needed for
-     `feature_cols` even when the calibrated wrapper is the active model.
-   - Load `feature_means` for NaN imputation.
-   - Load `ensemble_weight` from disk (falls back to 0.3 if missing).
-6. **Rolling features**: `compute_rolling_features()` +
-   `add_four_factors()` + `add_opponent_rebound_data()` +
-   `add_rest_features()`, then a per-team groupby adds rolling
-   four-factors columns. This is the exact same transformation as in
-   `build_feature_matrix()` so training and inference stay aligned.
-7. A closure `_xgb_predict(home_elo, away_elo, home_id, away_id)` is built.
-   It:
-   - Calls `build_prediction_features()` with the stats row.
-   - Aligns columns against `feature_cols` (imputing missing ones via
-     `feature_means`).
-   - Runs `actual_model.predict_proba(row)[:, 1]` → `xgb_prob`.
-   - Runs `predict_home_win_prob(home_elo, away_elo)` → `elo_prob`.
-   - Returns `ensemble_predict(elo_prob, xgb_prob)` (log-odds blend).
+5. **`PredictionEngine(games, off_def_elos)`** (`prediction_service.py`,
+   the ONE predict path shared with the API) loads everything once:
+   - `load_calibrated_model()` → the isotonic wrapper that actually predicts;
+     `load_model()` for `feature_cols`; `feature_means` for imputation;
+     the OOF-learned `ensemble_weight` (falls back to 0.3 if missing).
+   - Rolling features: `compute_rolling_features()` + `add_four_factors()`
+     + `add_opponent_rebound_data()` + `add_rest_features()` +
+     `add_rolling_four_factors()` — the exact transformation
+     `build_feature_matrix()` uses, so training and inference stay aligned.
+   - `latest_regulars()` from the player game logs — each team's current
+     rotation with typical minutes (§4.10).
+6. **`engine.predict(home_elo, away_elo, home_id, away_id)`** per game:
+   - Schedule-correct rest for the upcoming game
+     (`rest_features_for_upcoming`) and expected availability from the
+     regulars × injury list (`compute_player_impact_features`) are injected
+     as `extra_features`.
+   - `build_prediction_features()` builds the row (its `elo_home_prob` is
+     computed from the FINAL rest/availability values), columns are aligned
+     to `feature_cols` with `feature_means` imputation.
+   - `calibrated.predict_proba(row)` → `xgb_prob`;
+     `predict_home_win_prob(home_elo, away_elo, rest…, missing…)` →
+     `elo_prob` (home advantage + b2b + availability terms);
+     `ensemble_predict(elo_prob, xgb_prob)` → the log-odds blend.
+7. (Line movement, spread/total predictions and the driver-attribution
+   feature row are produced as side outputs of the same call.)
 8. **`sync_injuries_from_espn()`** refreshes `data/injuries.json` from
    ESPN, preserving manual overrides.
 9. **`get_nba_odds()`** hits Polymarket Gamma + CLOB; **`get_espn_odds()`**
@@ -363,16 +379,19 @@ or module you can `grep` for.
     movement analysis.
 11. **`generate_recommendations()`** (`betting/recommendations.py`) is
     called with all the above. Per game, it:
-    - Runs `predict_fn` → `model_home_prob`.
-    - Applies injury adjustment: `model_home_prob += home_impact - away_impact`,
-      clipped to `[0.01, 0.99]`.
+    - Runs `predict_fn` → `model_home_prob` (availability already inside).
+    - Computes the heuristic injury estimate for DISPLAY
+      (`home/away_injury_adj`); it is not applied to the probability unless
+      `APPLY_POST_HOC_INJURY_ADJUSTMENT` is flipped (§10.1g).
     - Looks up `market_home_prob` (Polymarket first, ESPN fallback).
     - **Shrinks**: `shrunken_home_prob = shrink_to_market(model, market, 0.6)`.
     - Computes `home_edge` and `away_edge` **against the shrunken
       probability** — not the raw model.
     - Picks the best side iff it's positive-EV AND passes the
       `MIN_BET_SIDE_PROB = 0.30` floor.
-    - Sizes with quarter-Kelly, capped at 5% bankroll.
+    - Sizes with signal-dependent quarter-Kelly, capped at 5% bankroll,
+      then re-optimises the whole slate jointly (portfolio Kelly, §5.5)
+      when more than one bet is actionable.
     - Assigns badge: `NO BET` for filtered rows, else STRONG/MODERATE/
       LEAN/SUSPECT by edge magnitude.
     - Generates an explanation that prefers signals agreeing with the
@@ -1297,30 +1316,36 @@ If this repo were gone and you had to rebuild it:
    `fetch_upcoming_games`, `sync_games` with ET timezone). Use
    ScoreboardV3, never live ScoreBoard. Write `data/polymarket.py` (Gamma
    + CLOB clients). Write `data/espn.py` for injuries/odds/rosters.
-3. **DB**: define Team, Game, GameStats, EloRating, PlayerStat,
-   OddsSnapshot. Keep team IDs = NBA.com IDs (not auto-increment).
-4. **Elo**: implement `models/elo.py` with MOV + home + carryover.
-   Populate `EloRating` via `compute_all_elos()` that iterates games
-   chronologically.
+3. **DB**: define Team, Game, GameStats, PlayerGameStat, EloRating,
+   OddsSnapshot, HistoricalInjury. Keep team IDs = NBA.com IDs (not
+   auto-increment). Sync BOTH team and player game logs (one
+   `LeagueGameLog` call each per season segment).
+4. **Elo**: implement `models/elo.py` with 538 MOV + home advantage 40 +
+   carryover 0.75 + the two context terms (b2b −25, availability
+   −150·Δmissing_pct), applied in prediction AND update. Populate
+   `EloRating` via `compute_all_elos()` that iterates games chronologically
+   with each team's rest and missing-minutes share.
 5. **Features**:
    - `features/rolling.py`: shift(1) + rolling windows. Derive
      `pts_against` with vectorized `np.where`.
    - `features/four_factors.py`: Dean Oliver's Four Factors.
    - `features/rest_days.py`: rest/b2b/7-day/14-day game counts.
+   - `features/availability.py`: regulars / typical minutes / who did not
+     play, from the player logs; the SAME definitions serve the live path.
    - `features/builder.py`: the pivot + diff assembler. Include
      Pythagorean (scalar + vectorized). Save feature_means.
 6. **Model**:
    - `models/xgboost_model.py`: HistGradientBoostingClassifier wrapper.
    - `models/calibration.py`: CalibratedClassifierCV(cv="prefit") with
      FrozenEstimator and `method="isotonic"`.
-   - `models/ensemble.py`: log-odds blend, grid-search weight on the
-     calibration fold.
+   - `models/ensemble.py`: log-odds blend, weight grid-searched on the
+     walk-forward OUT-OF-FOLD predictions (never the calibration slice).
 7. **Betting**:
    - `betting/edge.py`: compute_edge, badges.
    - `betting/kelly.py`: quarter-Kelly with 5% cap.
    - **`betting/shrinkage.py`: the logit-space prior update.**
-   - `betting/recommendations.py`: the orchestrator. Predict → inject
-     → shrink → edge → floor → size → explain.
+   - `betting/recommendations.py`: the orchestrator. Predict (context
+     already inside the model) → shrink → edge → floor → size → explain.
 8. **Explanations**: template-based, prefer signals agreeing with bet.
 9. **Display**: Rich console + FastAPI + static `frontend/index.html`.
    In both, show the SHRUNKEN probability in the Model column.
@@ -1336,6 +1361,15 @@ If this repo were gone and you had to rebuild it:
 - Log-odds (not probability-average) ensemble.
 - `ELO_HOME_ADVANTAGE` calibrated to the realized home-win rate (~40,
   not the 538 default of 100) — §6.10.
+- Elo context terms (b2b, availability) enter BOTH the prediction and the
+  rating update, and the training column `elo_home_prob` is the same
+  formula the live path evaluates on the final rest/availability values.
+- Availability definitions are shared between training (actual
+  participation) and live (regulars × injury list) — `features/availability.py`
+  is the single source; never re-derive "who is out" elsewhere.
+- Every model change is gated by a paired t ≥ 2 on held-out games
+  (replay harness for Elo, walk-forward OOF for the GBM/blend);
+  within-noise changes are not shipped.
 - Ensemble weight + calibration ECE measured **out-of-fold**, never on
   the isotonic calibration slice (which fakes ECE≈0) — §6.11.
 - Kelly `disagree_factor` is fed the probability gap `|p_model−p_market|`,
