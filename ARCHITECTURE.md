@@ -1206,7 +1206,8 @@ from nba_betting.features.builder import build_feature_matrix
 X, y = build_feature_matrix()
 print(X.shape, 'NaN?', X.isna().any().any())
 "
-# Expect: ~(6500+, 98), NaN? False  (5 seasons synced)
+# Expect: ~(6500+, 104), NaN? False  (5 seasons synced; 98 features + 6
+#         `_`-prefixed metadata columns)
 
 # 2. Scalar and vectorized Pythagorean agree
 .venv/bin/python3 -c "
