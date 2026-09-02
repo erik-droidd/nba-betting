@@ -457,6 +457,13 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
                 - game_features[f"away_pyth_roll_{window}"]
             )
 
+    # Defragment before the remaining column inserts. Building the feature
+    # set adds hundreds of columns in small batches, which fragments the
+    # underlying NumPy buffers; pandas emits a PerformanceWarning on further
+    # inserts once the frame is fragmented (it surfaced from the
+    # line-movement step in `market-eval` / `train` output).
+    game_features = game_features.copy()
+
     # Step 7b: Injury features from the historical_injuries snapshot
     # table. For games predating the daily snapshot collector these will
     # all be 0 — the model learns injuries are "unknown, treat as
@@ -471,12 +478,6 @@ def build_feature_matrix(recompute_elos: bool = True) -> tuple[pd.DataFrame, pd.
     # to ignore the zero rows (they carry no signal on their own) and
     # weight the non-zero rows accordingly.
     _attach_line_movement_features(game_features)
-
-    # Defragment game_features before the final column additions. Building
-    # the full feature set adds hundreds of columns in small batches, which
-    # fragments the underlying NumPy buffers. A single .copy() consolidates
-    # them so that subsequent column assignments don't trigger PerformanceWarning.
-    game_features = game_features.copy()
 
     # (Step 7d — player-availability features — now attached in Step 6b
     # from real player game logs; they used to be constant 0.0 here.)

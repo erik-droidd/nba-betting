@@ -298,6 +298,14 @@ python3 -m nba_betting clv
 
 Shows a per-bet CLV breakdown: your bet price, the closing Polymarket price, the logit delta, and whether each bet beat the line. Includes a rolling average CLV and a t-statistic (the statistical measure of whether your CLV is meaningfully positive). CLV is the fastest way to validate betting skill — 50 bets of positive CLV is statistically significant, whereas ROI needs hundreds.
 
+### Scoring Against the Closing Line
+
+```bash
+python3 -m nba_betting market-eval
+```
+
+Joins walk-forward out-of-fold predictions to the **real closing lines** captured by the snapshot cron and scores model vs market on the same games: moneyline Brier / log-loss with the shrinkage weight λ that minimises log-loss (vs the live `MARKET_SHRINKAGE_LAMBDA`), spread and total MAE, and the hit rate of the model's spread/total picks against the 52.4% break-even. Every section prints `n`; the verdict is withheld until ~300 games have a closing line (`--min-games`), roughly one season of the cron. Run it each off-season — it is the harness that decides λ and whether spread/total picks earn a stake. As of 2026-09 (126 games): the model ties the closing line on the moneyline, shrinking helps, λ=0.6 is within noise of the best, and the total head is worse than the book.
+
 ### Backtesting (Historical Simulation)
 
 To see how the strategy would have performed on past data:
@@ -552,6 +560,7 @@ python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, for
 python3 -m nba_betting import-snapshots --pull   # Git-pull + load odds + injury JSONL snapshots from GH Actions (daily)
 python3 -m nba_betting import-snapshots          # Same, but without the git pull step
 python3 -m nba_betting snapshot-injuries         # Today's ESPN injury list -> historical_injuries (or --jsonl DIR for file mode)
+python3 -m nba_betting market-eval               # Model vs real closing lines (moneyline λ, spread/total picks); needs ~300 lined games
 
 # Backtesting (four modes)
 python3 -m nba_betting backtest                              # Pure model benchmark (no market odds)

@@ -54,6 +54,24 @@ _DEFAULT_SPREAD = 0.0
 SPREAD_EDGE_PTS = 1.5
 TOTAL_EDGE_PTS = 2.5
 
+# Regressor hyperparameters — heavily regularized, like the classifier's
+# DEFAULT_PARAMS (2026-09). The previous (max_iter 400, depth 5, lr 0.05,
+# min_samples_leaf 20) overfit at this sample size: walk-forward MAE over
+# 3 held-out seasons (n=3948) improved 11.61 -> 11.28 pts for the spread
+# (paired t = +6.4) and 15.43 -> 14.88 for the total (t = +7.4). Note the
+# spread head is only on par with a linear fit on the Elo gap (11.23 MAE)
+# — margin prediction is essentially Elo — while the total head does beat
+# the naive league-mean baseline (16.17). Module-level so the market-eval
+# harness trains identical per-fold regressors.
+REG_PARAMS = dict(
+    max_iter=200,
+    max_depth=3,
+    learning_rate=0.02,
+    min_samples_leaf=100,
+    l2_regularization=10.0,
+    random_state=42,
+)
+
 
 def _get_feature_cols(X: pd.DataFrame) -> list[str]:
     """Same rule as xgboost_model._get_feature_cols — drop _-prefixed cols."""
@@ -96,22 +114,7 @@ def train_spread_total_regressors(
     n = len(X_features)
     split = int(n * 0.8)
 
-    # Heavily regularized, like the classifier's DEFAULT_PARAMS (2026-09).
-    # The previous (max_iter 400, depth 5, lr 0.05, min_samples_leaf 20)
-    # overfit at this sample size: walk-forward MAE over 3 held-out seasons
-    # (n=3948) improved 11.61 -> 11.28 pts for the spread (paired t = +6.4)
-    # and 15.43 -> 14.88 for the total (t = +7.4) with these settings. Note
-    # the spread head is only on par with a linear fit on the Elo gap
-    # (11.23 MAE) — margin prediction is essentially Elo — while the total
-    # head does beat the naive league-mean baseline (16.17).
-    params = dict(
-        max_iter=200,
-        max_depth=3,
-        learning_rate=0.02,
-        min_samples_leaf=100,
-        l2_regularization=10.0,
-        random_state=42,
-    )
+    params = dict(REG_PARAMS)
 
     spread_model = HistGradientBoostingRegressor(**params)
     spread_model.fit(X_features.iloc[:split], y_spread.iloc[:split])

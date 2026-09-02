@@ -139,6 +139,8 @@ nba_betting/
 │                                 snapshot_game_date() is the ONE key
 │                                 (game's ET date = Game.date) used for
 │                                 filing and for every lookup.
+│                                 batch_closing_lines() loads the latest
+│                                 snapshot per (game, source) in one query.
 │   ├── snapshot_jsonl.py       — DB-free odds capture (GH Actions) +
 │   │                              importer that re-resolves each record
 │   │                              to the real game.
@@ -265,6 +267,12 @@ nba_betting/
 │   ├── explanations.py         — Template-based (no LLM) natural-language
 │   │                              "why this bet" generator. Prefers
 │   │                              signals that agree with the bet side.
+│   ├── market_eval.py          — `market-eval`: walk-forward OOF model vs
+│   │                              REAL closing lines on the same games —
+│   │                              moneyline Brier/log-loss + the shrinkage
+│   │                              λ that minimises log-loss, spread/total
+│   │                              MAE + pick hit rates. Significance-gated
+│   │                              verdict; withheld below --min-games.
 │   ├── backtest.py             — Walk-forward historical simulation.
 │   │                              ⚠ Uses Elo as the "market proxy" because
 │   │                              we don't have historical Polymarket
@@ -1232,9 +1240,9 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (134 tests across thirteen files).
+# 7. Full test suite (138 tests across fourteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 134 passed in < 5s.
+# Expect: 138 passed in < 5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
@@ -1262,6 +1270,12 @@ print('OK')
 #   season scoping / trades, live expected availability)
 # test_elo_availability.py   —  5 tests (Elo availability term, compute_all_elos
 #   threads it, prediction-row consistency, post-hoc adjustment display-only)
+# test_market_eval.py        —  4 tests (vectorized shrinkage == scalar, λ grid
+#   picks the sharper source, cover/push accounting, paired t)
+
+# 8. Model vs the real closing line (the knob-setting harness; verdict is
+#    withheld until ~300 games have a closing line — a season of the cron).
+.venv/bin/python3 -m nba_betting market-eval
 
 # 8. Check how much historical data has accumulated for the new
 #    injury/odds features. < 30 distinct days = don't bother retraining
@@ -1874,3 +1888,28 @@ come from the previous season's final games (often a tank-mode rotation),
 so a listed star may not match a regular and the term reads 0 — the
 training rows behave the same way, so train/predict stay consistent, and
 it self-corrects after five games.
+
+**Follow-up (same pass): remaining suggestions.**
+
+- *Cheap Elo experiments — all within noise, recorded so they aren't
+  re-run* (replay on top of b2b + availability, n=5268 / 2630): third
+  game in four nights (10-30 pts, t −0.5..+0.4), any 3-in-4 (t +1.4 /
+  −0.1), fourth in five nights (t ≈ 0), 3+ days' rest bonus (t ≈ +1),
+  Denver/Utah altitude home bonus (20-80 pts: t +2.1 on four seasons but
+  −0.1 on the last two — sign flips, i.e. noise), playoff home-court
+  ±20-60 (t −2..+0.5). Schedule context beyond the back-to-back flag and
+  roster availability carries nothing Elo can use.
+- *`market-eval` harness* (`betting/market_eval.py`): walk-forward OOF
+  blend / margin / total joined to the latest pre-game snapshot per game
+  (Polymarket for the moneyline, ESPN for spread/total) and scored
+  against the market on the SAME games. First run (2026-09, 126
+  moneyline / 107 spread-total games, mostly 2026 playoffs — not yet
+  informative, verdict withheld below 300): model Brier 0.2100 vs market
+  0.2093 (paired t +0.08 — the model ties the closing line), shrunk
+  λ=0.60 0.2061, best λ=0.70 (t +0.09 vs live → no change); spread MAE
+  model 12.65 vs market 12.83 (t −0.5), picks at ±1.5: 39/71 = 54.9%;
+  total MAE model 15.32 vs market 13.90 (t +2.3 — the book is better),
+  picks at ±2.5: 43/86 = 50.0%. Totals stay information-only. Re-run
+  after a season of the snapshot cron; it will set
+  `MARKET_SHRINKAGE_LAMBDA` empirically and decide whether spread picks
+  deserve a stake.
