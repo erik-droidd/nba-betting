@@ -137,6 +137,15 @@ nba_betting/
 │                                 snapshot_game_date() is the ONE key
 │                                 (game's ET date = Game.date) used for
 │                                 filing and for every lookup.
+│   ├── snapshot_jsonl.py       — DB-free odds capture (GH Actions) +
+│   │                              importer that re-resolves each record
+│   │                              to the real game.
+│   └── injury_jsonl.py         — DB-free DAILY injury capture (GH
+│                                 Actions, same cron): one ET-dated file
+│                                 per day, latest capture wins, untouched
+│                                 when unchanged; importer replaces the
+│                                 day in historical_injuries. This is
+│                                 what makes the injury features accumulate.
 │                                 Auto-deduplicates: skips snapshot if
 │                                 prices moved < 0.5% within a 4h window.
 │
@@ -1581,11 +1590,14 @@ Review pass after both data streams reached `READY` tier:
   low coverage until a cron has been running for at least a few weeks
   of NBA games. Until then the Elo proxy remains the default.
 - **Injury features are likewise forward-looking** — the historical
-  injury archive is only populated from the day `injury sync` starts
+  injury archive is only populated from the day the collector starts
   running. Old training games have `injury_impact_*` = 0; the model
   learns to treat that as "unknown, average" but the feature will only
   become truly predictive once it has a season or two of real data
-  under it.
+  under it. Since 2026-09 the GitHub Actions cron captures the full
+  ESPN list every firing (`snapshot-injuries --jsonl`, imported by
+  `import-snapshots`), so coverage no longer depends on the user
+  running `predict` — 33 days of coverage in five seasons before that.
 - **Meta-learner requires WF data to train** — `ensemble_meta.joblib`
   is only produced when there are sufficient out-of-fold folds. On a
   fresh install with limited history, the system silently falls back to
@@ -1769,3 +1781,31 @@ deliberately excluded (bubble / no-fans home advantage).
 `predict-path-eval` n=1315: correct-vs-live t = +0.33 (no fix), fresh-rest
 t = +0.45; Elo-proxy backtest ROI +4.1% over 2284 bets (upper bound, §6.6);
 real-odds backtest coverage still 3% (124 games) — not yet informative.
+
+**Follow-up (same pass): daily injury snapshots in the cron.**
+`data/injury_jsonl.py` + `snapshot-injuries --jsonl` mirror the odds
+JSONL path: the GH Actions workflow now writes the full ESPN injury list
+to `data/injury_snapshots/<ET-date>.jsonl` on every firing (latest
+capture of the day wins; file untouched — no commit — when the list is
+unchanged), and `import-snapshots` replaces each day's rows in
+`historical_injuries` (idempotent). `sync_injuries_from_espn` was split
+into a file/DB-free `build_injury_list_from_espn` plus the local save,
+and its `historical_injuries` snapshot date is now the ET day
+(`today_et()`) rather than the machine's local date — for a European
+user in the evening that was already tomorrow, so those rows never
+joined the game's `Game.date`.
+
+**Also found while wiring it — stale injury list (real production bug).**
+ESPN's injuries endpoint stopped returning ``athlete.id``, and
+`sync_injuries_from_espn` inferred "manual override, keep forever" from
+an empty ``player_id``. Result: every synced entry became immortal;
+`data/injuries.json` had grown to **258 entries spanning 2025-09 to
+2026-05** while ESPN listed 76, so the post-hoc injury adjustment and the
+live injury features were counting long-healed players as absent, and
+every impact rating fell to the bench tier (depth-chart lookups need the
+id). Fixes: `espn._athlete_id` recovers the id from the athlete's links /
+headshot URL; `PlayerInjury.source` ("espn" | "manual") is now the
+explicit override flag (legacy id-less records load as "espn" and are
+dropped by the next sync); status lookups are case-insensitive (ESPN
+sends ``Day-To-Day``, which the exact-match table sent to the 0.5
+default). `tests/test_injury_sync.py` pins all three.

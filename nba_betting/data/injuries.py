@@ -27,17 +27,40 @@ class PlayerInjury:
     impact_rating: float = 0.0  # 0-10 scale, estimated impact on team win prob
     date_reported: str = ""
     player_id: str = ""  # ESPN athlete ID for cross-referencing
+    # "espn" (synced) or "manual" (added via `injury add`). Manual entries
+    # survive an ESPN sync; ESPN entries are replaced wholesale by the next
+    # sync. This used to be inferred from an empty player_id — which broke
+    # silently when ESPN stopped sending athlete ids (every synced entry
+    # became an immortal "override"; injuries.json reached 258 entries
+    # spanning nine months). Legacy records without the field load as
+    # "espn", i.e. they are dropped by the next sync, which is correct.
+    source: str = "espn"
+
+
+_STATUS_MISS_PROB = {
+    "out": 1.0,
+    "out for season": 1.0,
+    "doubtful": 0.85,
+    "day-to-day": 0.60,
+    "questionable": 0.50,
+    "probable": 0.15,
+}
+
+
+def _norm_status(status: str) -> str:
+    return (status or "").strip().lower()
 
 
 def _status_multiplier(status: str) -> float:
-    """Convert injury status to probability of missing the game."""
-    return {
-        "Out": 1.0,
-        "Doubtful": 0.85,
-        "Day-to-Day": 0.60,
-        "Questionable": 0.50,
-        "Probable": 0.15,
-    }.get(status, 0.5)
+    """Convert injury status to probability of missing the game.
+
+    Case-insensitive: ESPN reports ``Day-To-Day`` (capital T), which the
+    old exact-match table silently sent to the 0.5 default.
+    """
+    key = _norm_status(status)
+    if key.startswith("out"):
+        return 1.0
+    return _STATUS_MISS_PROB.get(key, 0.5)
 
 
 def load_injuries() -> list[PlayerInjury]:
@@ -61,6 +84,7 @@ def save_injuries(injuries: list[PlayerInjury]) -> None:
             "impact_rating": inj.impact_rating,
             "date_reported": inj.date_reported,
             "player_id": inj.player_id,
+            "source": inj.source,
         })
     INJURIES_FILE.write_text(json.dumps(data, indent=2))
 
@@ -83,6 +107,7 @@ def add_injury(
         reason=reason,
         impact_rating=impact_rating,
         date_reported=str(date.today()),
+        source="manual",
     )
     injuries.append(injury)
     save_injuries(injuries)
@@ -117,35 +142,37 @@ def _estimate_impact_rating(status: str, depth_rank: int) -> float:
         base = 2.0  # Bench player
 
     # Status modifier (already handled by _status_multiplier in edge calc,
-    # but we also want the stored rating to reflect severity)
-    status_factor = {
-        "Out": 1.0,
-        "Doubtful": 0.9,
-        "Day-to-Day": 0.6,
-        "Questionable": 0.5,
-        "Probable": 0.2,
-    }.get(status, 0.5)
+    # but we also want the stored rating to reflect severity). Case-
+    # insensitive for the same reason as _status_multiplier.
+    key = _norm_status(status)
+    status_factor = 1.0 if key.startswith("out") else {
+        "doubtful": 0.9,
+        "day-to-day": 0.6,
+        "questionable": 0.5,
+        "probable": 0.2,
+    }.get(key, 0.5)
 
     return round(base * status_factor, 1)
 
 
-def sync_injuries_from_espn() -> list[PlayerInjury]:
-    """Fetch current injuries from ESPN and update the injury list.
+def build_injury_list_from_espn(
+    manual_overrides: dict[str, PlayerInjury] | None = None,
+) -> list[PlayerInjury]:
+    """Fetch the ESPN injury report and estimate impact ratings from the
+    depth charts. **No local file or DB access** — this is the piece the
+    GitHub Actions runner uses (`snapshot-injuries --jsonl`).
 
-    Replaces the current injury list with ESPN data while preserving
-    any manual overrides (injuries with no player_id).
-
-    Returns the updated injury list.
+    ``manual_overrides`` (keyed by lower-cased player name) win over the
+    ESPN entry for the same player and are appended if ESPN doesn't list
+    them. Returns ``[]`` when ESPN returns nothing, so callers can keep
+    whatever they already had.
     """
     from nba_betting.data.espn import fetch_injuries, fetch_depth_chart, NBA_ABBR_TO_ESPN_ID
 
     espn_injuries = fetch_injuries()
     if not espn_injuries:
-        return load_injuries()
-
-    # Load existing manual overrides (entries with no ESPN player_id)
-    existing = load_injuries()
-    manual_overrides = {i.player_name.lower(): i for i in existing if not i.player_id}
+        return []
+    manual_overrides = manual_overrides or {}
 
     # Build depth chart lookup for impact estimation (cache per team)
     depth_cache: dict[str, dict[str, int]] = {}
@@ -200,6 +227,7 @@ def sync_injuries_from_espn() -> list[PlayerInjury]:
             impact_rating=impact,
             date_reported=inj.get("date", str(date.today())),
             player_id=player_id,
+            source="espn",
         ))
         seen_players.add(name_lower)
 
@@ -208,14 +236,39 @@ def sync_injuries_from_espn() -> list[PlayerInjury]:
         if name_lower not in seen_players:
             new_injuries.append(override)
 
+    return new_injuries
+
+
+def sync_injuries_from_espn() -> list[PlayerInjury]:
+    """Fetch current injuries from ESPN and update the injury list.
+
+    Replaces the current injury list with ESPN data while preserving
+    any manual overrides (injuries with no player_id).
+
+    Returns the updated injury list.
+    """
+    from nba_betting.data.nba_stats import today_et
+
+    # Manual overrides survive the sync; everything ESPN-sourced is
+    # replaced wholesale (a healed player must disappear).
+    existing = load_injuries()
+    manual_overrides = {i.player_name.lower(): i for i in existing if i.source == "manual"}
+
+    new_injuries = build_injury_list_from_espn(manual_overrides)
+    if not new_injuries:
+        return existing
+
     save_injuries(new_injuries)
 
     # Persist a dated snapshot so future training runs can reconstruct
     # "who was out the day we predicted game X". We don't have an ESPN
     # archive API, so this accumulates going forward — every time the
-    # sync runs it upserts one row per (date, player_id).
+    # sync runs it upserts one row per (date, player_id). Keyed by the
+    # NBA (ET) day — `date.today()` was the machine's local date, which
+    # for a European user in the evening is already tomorrow and would
+    # never join the game's `Game.date`.
     try:
-        persist_historical_injuries(new_injuries, snapshot_date=date.today())
+        persist_historical_injuries(new_injuries, snapshot_date=today_et())
     except Exception:
         pass  # Non-critical
 

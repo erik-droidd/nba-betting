@@ -5,6 +5,8 @@ Base URL: https://site.api.espn.com/apis/site/v2/sports/basketball/nba
 """
 from __future__ import annotations
 
+import re
+
 import time
 from typing import Optional
 
@@ -173,6 +175,43 @@ def fetch_scoreboard(date_str: str | None = None) -> list[dict]:
     return games
 
 
+_ATHLETE_ID_PATTERNS = (
+    re.compile(r"/id/(\d+)"),                 # .../nba/player/_/id/4712863/name
+    re.compile(r"/players/full/(\d+)\."),     # headshot .../players/full/4712863.png
+    re.compile(r"~a:(\d+)"),                  # sportscenter://...uid=s:40~l:46~a:4712863
+)
+
+
+def _athlete_id(athlete: dict) -> str:
+    """ESPN athlete id as a string, or "" if it can't be determined.
+
+    The injuries endpoint stopped including ``athlete.id`` (2026); the id
+    is still present in the athlete's ``links`` hrefs and ``headshot``
+    URL. An empty id used to make `sync_injuries_from_espn` treat every
+    ESPN entry as a manual override and keep it forever (258 stale
+    entries by 2026-09) — so recover it from wherever it still lives.
+    """
+    direct = athlete.get("id")
+    if direct not in (None, ""):
+        return str(direct)
+    candidates: list[str] = []
+    for link in athlete.get("links") or []:
+        href = link.get("href") if isinstance(link, dict) else None
+        if href:
+            candidates.append(href)
+    headshot = athlete.get("headshot")
+    if isinstance(headshot, dict) and headshot.get("href"):
+        candidates.append(headshot["href"])
+    elif isinstance(headshot, str):
+        candidates.append(headshot)
+    for text in candidates:
+        for pat in _ATHLETE_ID_PATTERNS:
+            m = pat.search(text)
+            if m:
+                return m.group(1)
+    return ""
+
+
 def fetch_injuries() -> list[dict]:
     """Fetch current NBA injury report from ESPN.
 
@@ -205,7 +244,7 @@ def fetch_injuries() -> list[dict]:
             athlete = inj.get("athlete", {})
             injuries.append({
                 "player_name": athlete.get("displayName", ""),
-                "player_id": str(athlete.get("id", "")),
+                "player_id": _athlete_id(athlete),
                 "team_abbr": team_espn_abbr,
                 "status": inj.get("status", "Unknown"),
                 "description": inj.get("longComment", inj.get("shortComment", "")),

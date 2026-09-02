@@ -1358,6 +1358,60 @@ def snapshot_odds(
         console.print(f"[yellow]  warn: {w}[/yellow]")
 
 
+@app.command(name="snapshot-injuries")
+def snapshot_injuries(
+    jsonl: str = typer.Option(
+        None,
+        "--jsonl",
+        help=(
+            "Write today's (ET) full injury list to a JSONL file under this "
+            "directory instead of the local DB — the DB-free mode the GitHub "
+            "Actions runner uses. Defaults to data/injury_snapshots/. Load it "
+            "locally with `import-snapshots`."
+        ),
+    ),
+) -> None:
+    """Capture today's ESPN injury report as a dated snapshot.
+
+    Default (no flag): same as `injury sync` — refresh data/injuries.json and
+    upsert today's rows into the local `historical_injuries` table.
+
+    `--jsonl DIR`: DB-free; writes/refreshes `DIR/<ET-date>.jsonl` with the
+    full league list (latest capture of the day wins; untouched when the
+    list hasn't changed). This is what makes the injury training features
+    accumulate without anyone running `predict` — see ARCHITECTURE §4.10.
+    """
+    if jsonl is not None:
+        from nba_betting.data.injury_jsonl import (
+            DEFAULT_INJURY_SNAPSHOT_DIR, capture_injuries_to_jsonl,
+        )
+        out_dir = jsonl if jsonl else str(DEFAULT_INJURY_SNAPSHOT_DIR)
+        result = capture_injuries_to_jsonl(out_dir)
+        status = "ok" if not result.get("warnings") else "warn"
+        console.print(
+            f"[{'green' if status == 'ok' else 'yellow'}]"
+            f"snapshot-injuries[jsonl] {status}[/] "
+            f"date={result.get('snapshot_date')} "
+            f"players={result.get('players', 0)} "
+            f"written={result.get('written', 0)} "
+            f"unchanged={result.get('unchanged', False)} "
+            f"path={result.get('path', '')}"
+        )
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]  warn: {w}[/yellow]")
+        return
+
+    from nba_betting.data.injuries import sync_injuries_from_espn
+    from nba_betting.db.session import init_db
+
+    init_db()
+    injuries = sync_injuries_from_espn()
+    out_count = len([i for i in injuries if i.status in ("Out", "Doubtful")])
+    console.print(
+        f"[green]snapshot-injuries ok[/] players={len(injuries)} out_or_doubtful={out_count}"
+    )
+
+
 @app.command(name="import-snapshots")
 def import_snapshots(
     path: str = typer.Option(
@@ -1378,8 +1432,18 @@ def import_snapshots(
             "`python3 -m nba_betting import-snapshots --pull`."
         ),
     ),
+    injuries_path: str = typer.Option(
+        "data/injury_snapshots",
+        "--injuries-path",
+        help=(
+            "Directory of per-day injury JSONL files produced by "
+            "`snapshot-injuries --jsonl` (the GH Actions cron). Imported "
+            "into `historical_injuries` after the odds files; skipped "
+            "silently if the directory doesn't exist."
+        ),
+    ),
 ) -> None:
-    """Import odds snapshots from JSONL files into the local DB.
+    """Import odds (and injury) snapshots from JSONL files into the local DB.
 
     Typical workflow (daily):
         python3 -m nba_betting import-snapshots --pull
@@ -1521,6 +1585,19 @@ def import_snapshots(
         console.print(f"[yellow]  warn: {e}[/yellow]")
     if len(result["errors"]) > 10:
         console.print(f"[dim]  ({len(result['errors']) - 10} more errors suppressed)[/dim]")
+
+    # Daily injury snapshots (same cron, separate directory). Each file
+    # replaces its day in `historical_injuries`, so this is idempotent.
+    if injuries_path and _Path(injuries_path).exists():
+        from nba_betting.data.injury_jsonl import import_injuries_jsonl
+        inj = import_injuries_jsonl(injuries_path)
+        console.print(
+            f"[green]import-injuries ok[/] "
+            f"files={inj['files']} days={inj['days']} rows={inj['rows']} "
+            f"errors={len(inj['errors'])}"
+        )
+        for e in inj["errors"][:10]:
+            console.print(f"[yellow]  warn: {e}[/yellow]")
 
 
 @app.command(name="sync-players")
