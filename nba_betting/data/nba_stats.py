@@ -38,6 +38,19 @@ def today_et() -> date:
 _today_et = today_et
 
 
+def is_exhibition_game(game_id) -> bool:
+    """True for preseason (``001…``) and All-Star (``003…``) game ids.
+
+    NBA game ids encode the season type in their first three digits (002
+    regular season, 004 playoffs, 005 play-in, 006 NBA Cup final).
+    Exhibitions use experimental rotations and resting stars, nothing Elo
+    or the GBM were trained on, so a prediction for one is noise and an
+    "edge" against the market is fake: on 2026-10-05/06 `predict` staked
+    $10-50 on 9 preseason games at 17-34% edges.
+    """
+    return str(game_id or "")[:3] in ("001", "003")
+
+
 def _game_dict_from_v3(g: dict) -> dict:
     """Build a normalized game dict from a ScoreboardV3 game record."""
     home = g.get("homeTeam", {})
@@ -140,7 +153,7 @@ def _fetch_v3_games_for_date(target: date) -> list[dict]:
     return data.get("scoreboard", {}).get("games", []) or []
 
 
-def fetch_todays_games(include_started: bool = False) -> list[dict]:
+def fetch_todays_games(include_started: bool = False, include_exhibition: bool = False) -> list[dict]:
     """Fetch today's NBA games using the NBA's Eastern-time "today".
 
     Determines today's date in US Eastern time (the NBA's scheduling timezone)
@@ -151,6 +164,8 @@ def fetch_todays_games(include_started: bool = False) -> list[dict]:
     Args:
         include_started: If True, include in-progress and finished games as
             well. Default False returns only scheduled games (status=1).
+        include_exhibition: If True, keep preseason / All-Star games (see
+            ``is_exhibition_game``). Only the odds snapshot capture wants them.
 
     Returns:
         List of game dicts for today (ET). Empty if no matching games.
@@ -166,11 +181,13 @@ def fetch_todays_games(include_started: bool = False) -> list[dict]:
         status_code = g.get("gameStatus", 0)
         if not include_started and status_code != 1:
             continue
+        if not include_exhibition and is_exhibition_game(g.get("gameId")):
+            continue
         games.append(_game_dict_from_v3(g))
     return games
 
 
-def fetch_upcoming_games(days_ahead: int = 7) -> list[dict]:
+def fetch_upcoming_games(days_ahead: int = 7, include_exhibition: bool = False) -> list[dict]:
     """Fetch scheduled NBA games for the next N days using ScoreboardV3.
 
     Walks forward from tomorrow (in ET) until it finds the first day with at
@@ -180,6 +197,8 @@ def fetch_upcoming_games(days_ahead: int = 7) -> list[dict]:
 
     Args:
         days_ahead: Maximum days into the future to scan.
+        include_exhibition: Keep preseason / All-Star games (default: skip
+            them, so an exhibition-only day doesn't count as a game day).
 
     Returns:
         List of upcoming game dicts (same format as fetch_todays_games()),
@@ -194,6 +213,7 @@ def fetch_upcoming_games(days_ahead: int = 7) -> list[dict]:
         upcoming = [
             _game_dict_from_v3(g) for g in raw_games
             if g.get("gameStatus", 0) == 1
+            and (include_exhibition or not is_exhibition_game(g.get("gameId")))
         ]
         if upcoming:
             return upcoming

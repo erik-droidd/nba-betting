@@ -1272,15 +1272,16 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (183 tests across seventeen files).
+# 7. Full test suite (193 tests across eighteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 183 passed in < 5s.
+# Expect: 193 passed in < 5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
-# test_snapshot_jsonl.py     — 25 tests (JSONL round-trip, idempotence on
+# test_snapshot_jsonl.py     — 26 tests (JSONL round-trip, idempotence on
 #   the capture key, record-date game matching, legacy ESPN proxy blanking,
-#   repair_snapshots, ESPN-only slate, stamp-after-fetch, heartbeat dedupe)
+#   repair_snapshots incl. post-game + wrong-event rows, ESPN-only slate,
+#   stamp-after-fetch, heartbeat dedupe)
 # test_snapshot_loop.py      — 16 tests (tip-paced cadence, idle vs budget
 #   stop, fetch-failure retries, error tolerance, push throttling)
 # test_espn_odds.py          — 15 tests (current + legacy ESPN moneyline
@@ -1309,6 +1310,8 @@ print('OK')
 #   season scoping / trades, live expected availability)
 # test_elo_availability.py   —  5 tests (Elo availability term, compute_all_elos
 #   threads it, prediction-row consistency, post-hoc adjustment display-only)
+# test_exhibition_filter.py  —  9 tests (preseason/All-Star ids skipped by
+#   the game fetchers unless asked; exhibition-only days aren't game days)
 # test_market_eval.py        —  4 tests (vectorized shrinkage == scalar, λ grid
 #   picks the sharper source, cover/push accounting, paired t)
 
@@ -2038,8 +2041,49 @@ ties the close), λ=0.60 still best (0.5989 log-loss), spread MAE 12.59 vs
 12.80, total MAE 15.49 vs 14.09 (t +2.3, book better). Conclusions
 unchanged; verdict still withheld below 300 games.
 
-**Not re-run:** `train`. The line-movement features changed for the 136
-snapshot-era games (proxy ESPN probs gone, single-source
-`prob_movement`); they are zero for every other training game, so the
-effect is tiny, but the next `train` makes the saved model consistent.
+**`train` re-run on the repaired data (same day):** WF 66.9% / Brier
+0.2117 / log-loss 0.6123 (n=3949), Elo OOF 0.2077 (ECE 0.009), GBM OOF
+0.2112, w_elo 0.90 — unchanged vs 2026-09, and identical again after the
+follow-up repairs below. `odds_disagreement` is now 0
+for every training game (no real historical ESPN price exists), so the
+GBM ignores it until real ESPN moneylines accumulate.
+
+**Follow-up (same day): §8 checks found more.**
+
+- **Preseason games were predicted and staked.** Nothing filtered
+  exhibitions: on 2026-10-05/06 `predict` recommended $10-50 on 9
+  preseason games at 17-34% "edges" (Elo 89.8% vs market 63.5% for
+  BKN@CHA — Elo can't see resting starters). `nba_stats.is_exhibition_game`
+  (game id `001…` preseason, `003…` All-Star) now drops them in
+  `fetch_todays_games` / `fetch_upcoming_games` by default, so `predict`,
+  the dashboard API and `diagnose` skip them (`predict` says so). The odds
+  capture opts back in (`include_exhibition=True`): their snapshots never
+  join a stored game, and they kept the new loop exercised in October.
+  The 9 preseason entries were removed from `prediction_history.json`
+  (backup: `data/prediction_history.pre-preseason-cleanup-2026-10-06.json`)
+  — they could never resolve.
+- **Post-game prices.** Two early local captures (2026-04-09 MIA@TOR,
+  PHI@HOU, taken the next morning) stored the settled market (1.0) as the
+  latest row. `market-eval` already skips prices of 1, so it simply lost
+  those 2 games; the real damage was fake `prob_movement` values (+0.385,
+  +0.305) in the training matrix. `repair-snapshots` step 4 deletes rows
+  captured after their game's ET day or priced ≥ 0.99 / ≤ 0.01.
+- **Wrong-event Polymarket prices before the 2026-04-22 collision fix.**
+  Against ESPN's same-moment spread (margin ~ N(−spread, 13)), 0 of 519
+  post-fix captures are off by > 12 pts; 13 of 100 pre-fix ones are, in 4
+  playoff games (MIN@DEN 04-18 and 04-20, PHI@BOS 04-21, ORL@DET 04-22).
+  Step 5 deletes all pre-fix Polymarket rows of such a game (21 rows; 4
+  pre-fix playoff games have no comparator and are kept — their prices
+  are plausible). The 16 of them that came from the runner were also
+  deleted from `data/odds_snapshots/2026-04-2{0,1,2}.jsonl`, so a fresh
+  import matches the repaired table. Local DB backup before this step:
+  `data/nba_betting.pre-repair2-2026-10-06.db`.
+- `market-eval` after both repairs and the retrain (n=124: the 3
+  wrong-event games drop out, the 2 post-game games come back): model
+  Brier 0.2046 vs market 0.2081 (t −0.36 — still a tie with the close),
+  best λ 0.50 (log-loss 0.5870) vs live 0.60 (0.5871, t +0.06) → no
+  change; spread/total rows unchanged (n=108).
+- Noted, not changed: 11 prediction-history entries from 2026-04-08..10
+  store `edge` under an older ratio-style formula (e.g. 6.15); nothing
+  reads the stored edge.
 

@@ -28,7 +28,15 @@ def predict(
     from nba_betting.display.console import display_recommendations, display_no_games
 
     console.print("[dim]Fetching today's scheduled games...[/dim]")
-    games = fetch_todays_games()
+    from nba_betting.data.nba_stats import is_exhibition_game
+    games = fetch_todays_games(include_exhibition=True)
+    exhibitions = [g for g in games if is_exhibition_game(g.get("game_id"))]
+    games = [g for g in games if not is_exhibition_game(g.get("game_id"))]
+    if exhibitions:
+        console.print(
+            f"[yellow]Skipping {len(exhibitions)} preseason/exhibition game(s): "
+            "the model doesn't apply to them (resting stars, trial rotations).[/yellow]"
+        )
 
     if not games:
         # No scheduled games left today — look ahead for the next game day
@@ -1774,9 +1782,10 @@ def repair_snapshots_cmd(
     """One-off cleanup of odds_snapshots rows written by pre-2026-10 code.
 
     Removes duplicate rows, re-files snapshots that were attached to the
-    next game of a series (re-matched from the JSONL files), and NULLs
-    ESPN probabilities that were the spread proxy rather than a moneyline.
-    Idempotent. Back up data/nba_betting.db first.
+    next game of a series (re-matched from the JSONL files), NULLs ESPN
+    probabilities that were the spread proxy rather than a moneyline, and
+    deletes post-game prices and pre-2026-04-22 Polymarket prices taken
+    from the wrong event. Idempotent. Back up data/nba_betting.db first.
     """
     from nba_betting.data.snapshot_jsonl import repair_snapshots
     from nba_betting.db.session import init_db
@@ -1787,6 +1796,7 @@ def repair_snapshots_cmd(
     console.print(
         f"[green]{label}[/] duplicates_removed={res['duplicates_removed']} "
         f"rematched={res['rematched']} espn_probs_nulled={res['espn_probs_nulled']} "
+        f"postgame_removed={res['postgame_removed']} collision_removed={res['collision_removed']} "
         f"errors={len(res['errors'])}"
     )
     for e in res["errors"][:10]:

@@ -261,9 +261,9 @@ def capture_snapshot() -> dict:
     from nba_betting.data.polymarket import get_nba_odds
 
     warnings = []
-    games = fetch_todays_games()
+    games = fetch_todays_games(include_exhibition=True)
     if not games:
-        games = fetch_upcoming_games(days_ahead=2)
+        games = fetch_upcoming_games(days_ahead=2, include_exhibition=True)
     if not games:
         return {"games": 0, "saved": 0, "warnings": ["no games scheduled"]}
 

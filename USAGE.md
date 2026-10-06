@@ -211,7 +211,7 @@ python3 -m nba_betting import-snapshots --pull   # One-shot: fetch origin/main +
 
 `--pull` fetches `origin/main` and fast-forwards your checkout to it before importing, so snapshots committed overnight by the GitHub Actions runner land in your local working copy and then in your local `odds_snapshots` table in a single command. If it can't fast-forward (e.g. you're on a branch with local commits), it prints a warning and still imports whatever files already exist locally — safe to run daily.
 
-`import-snapshots` is **idempotent**: a record's key is `(home_team_id, away_team_id, source, timestamp)` — one capture of one matchup — so rerunning it on any cadence imports nothing twice. Each record is matched to its game from the record's own ET `game_date`; records whose game isn't in the DB yet (future or preseason games) are stored unlinked and linked by the next `sync`. You can also point it at a single file:
+`import-snapshots` is **idempotent**: a record's key is `(home_team_id, away_team_id, source, timestamp)` — one capture of one matchup — so rerunning it on any cadence imports nothing twice. Each record is matched to its game from the record's own ET `game_date`; records whose game isn't in the DB yet (future games) are stored unlinked and linked by the next `sync`; preseason captures stay unlinked (`sync` doesn't store exhibitions). You can also point it at a single file:
 
 ```bash
 python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.jsonl
@@ -253,7 +253,7 @@ python3 -m nba_betting repair-snapshots --dry-run   # report only
 python3 -m nba_betting repair-snapshots
 ```
 
-Removes duplicate rows (from the old import key), re-files closing lines that the old resolver attached to the *next* game of a playoff series (re-matched from the JSONL files), re-dates old local `predict` captures from their game id, and blanks the fake ESPN probabilities. Idempotent; a DB built from scratch with current code doesn't need it.
+Removes duplicate rows (from the old import key), re-files closing lines that the old resolver attached to the *next* game of a playoff series (re-matched from the JSONL files), re-dates old local `predict` captures from their game id, blanks the fake ESPN probabilities, and deletes post-game prices (settled 0/1 markets) and the pre-2026-04-22 Polymarket prices taken from the wrong event (games where Polymarket disagrees with ESPN's same-moment spread by > 12 pts). Idempotent; a DB built from scratch with current code doesn't need it.
 
 ### Step 3: Place Bets
 
@@ -422,13 +422,14 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-183 fast unit tests (~4 s); the main files:
+193 fast unit tests (~4 s); the main files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
 - **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
 - **`test_montecarlo.py`** (12): empirical bootstrap correctness, market-null behaviour, horizon-invariant log-growth metrics, reproducibility, input validation.
 - **`test_simulate_horizon.py`** (8): data-driven horizon projection, density scaling, edge-case fallbacks.
-- **`test_snapshot_jsonl.py`** (25): JSONL round-trip, idempotence on the capture key, game matching (late-tip captures stay on tonight's game; no guessing for preseason), legacy ESPN spread-proxy blanking, `repair-snapshots`, ESPN-only slate, timestamp after fetch, per-date ESPN odds, heartbeat dedupe.
+- **`test_exhibition_filter.py`** (9): preseason/All-Star games skipped by the game fetchers (so `predict` never stakes on them).
+- **`test_snapshot_jsonl.py`** (26): JSONL round-trip, idempotence on the capture key, game matching (late-tip captures stay on tonight's game; no guessing for preseason), legacy ESPN spread-proxy blanking, `repair-snapshots`, ESPN-only slate, timestamp after fetch, per-date ESPN odds, heartbeat dedupe.
 - **`test_snapshot_loop.py`** (16): tip-paced cadence, idle vs budget stop (successor dispatch), fetch-failure retries, error tolerance, push throttling.
 - **`test_espn_odds.py`** (15): moneyline parsing from ESPN's current and legacy shapes, de-vig, spread-proxy flagging, single-source `prob_movement`, no bets priced off the spread proxy.
 - **`test_injury_jsonl.py`** (10): ET-dated injury files, per-team tip-off freeze, scoreboard tip detection, idempotent import.
@@ -437,6 +438,9 @@ cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
 
 ### Common Issues
+
+**`predict` shows no games in early/mid October (or around All-Star weekend)**
+- Preseason and All-Star games are skipped on purpose (`Skipping N preseason/exhibition game(s)`): resting starters and trial rotations make Elo meaningless there, and any "edge" against the market is fake. Predictions resume with the regular season. The GitHub Actions snapshot loop still captures their odds, which is harmless.
 
 **"Market" column shows N/A for every game**
 - Polymarket has no live (open) market for that game. The system filters out closed/resolved markets to prevent stale prices from yesterday's results bleeding into today's edges. If every game shows N/A, you're likely running `predict` after games have started — markets close at tipoff.
@@ -505,7 +509,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (183 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (193 tests) |
 
 ---
 
@@ -586,7 +590,7 @@ python3 -m nba_betting simulate --n-sims 50000
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/ -v                                 # 183 unit tests (run after any code change)
+pytest tests/ -v                                 # 193 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN
