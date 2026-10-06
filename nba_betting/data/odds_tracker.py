@@ -5,6 +5,7 @@ from datetime import datetime, date, timedelta, timezone
 
 from sqlalchemy import select
 
+from nba_betting.data.espn_odds import market_home_prob
 from nba_betting.data.polymarket import (
     game_date_et,
     index_odds_by_pair,
@@ -68,6 +69,22 @@ def _is_duplicate(
         and _close(latest.spread, spread, _DEDUP_TOLERANCE_SPREAD)
         and _close(latest.over_under, over_under, _DEDUP_TOLERANCE_SPREAD)
     )
+
+
+def _prob_movement(snaps) -> float:
+    """Last-minus-first home win probability within ONE source (Polymarket
+    preferred, else ESPN), from timestamp-ordered snapshots.
+
+    Mixing sources (first Polymarket row vs last ESPN row, which is what a
+    plain first/last over all rows did, since both sources share each
+    capture's timestamp) measures the gap between two books, not movement.
+    """
+    for source in ("polymarket", "espn"):
+        probs = [s.home_prob for s in snaps
+                 if s.source == source and s.home_prob is not None]
+        if len(probs) >= 2:
+            return probs[-1] - probs[0]
+    return 0.0
 
 
 def snapshot_game_date(game: dict, fallback: date) -> date:
@@ -190,8 +207,9 @@ def snapshot_current_odds(
             # ESPN snapshot
             espn = espn_by_teams.get(key)
             if espn:
-                t = espn.get("teams", {})
-                espn_home_prob = t.get(home_abbr)
+                # Only a moneyline-derived prob is a market price; the
+                # spread proxy must not be stored as one.
+                espn_home_prob = market_home_prob(espn, home_abbr)
                 espn_spread = espn.get("spread")
                 espn_ou = espn.get("over_under")
                 if not _is_duplicate(
@@ -354,11 +372,7 @@ def batch_line_movements_by_game() -> dict[tuple, dict]:
         else:
             spread_movement = 0.0
 
-        prob_snaps = [s for s in snaps if s.home_prob is not None]
-        if len(prob_snaps) >= 2:
-            prob_movement = float((prob_snaps[-1].home_prob or 0) - (prob_snaps[0].home_prob or 0))
-        else:
-            prob_movement = 0.0
+        prob_movement = float(_prob_movement(snaps))
 
         poly_latest = None
         espn_latest = None
@@ -462,11 +476,7 @@ def get_line_movement(
             spread_movement = 0.0
 
         # Probability movement
-        prob_snaps = [s for s in snapshots if s.home_prob is not None]
-        if len(prob_snaps) >= 2:
-            prob_movement = (prob_snaps[-1].home_prob or 0) - (prob_snaps[0].home_prob or 0)
-        else:
-            prob_movement = 0.0
+        prob_movement = _prob_movement(snapshots)
 
         # Cross-source disagreement (Polymarket vs ESPN at same time)
         poly_latest = None

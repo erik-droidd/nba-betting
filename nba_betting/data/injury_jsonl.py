@@ -11,16 +11,19 @@ its own during the season, and ``import-snapshots`` loads it locally.
 
 Design:
 
-* **One file per ET day, latest capture wins.** ``data/injury_snapshots/
-  YYYY-MM-DD.jsonl`` holds the FULL league injury list as of the most
-  recent capture on that NBA day (~150 lines). The day is the ET date —
-  the same key ``historical_injuries.snapshot_date`` and ``Game.date``
-  use — so a 10 PM ET capture still files under the right day. The last
-  capture of a day is the one closest to tip-off, i.e. the best proxy
-  for "who was actually out", which is what training wants.
-* **No-change runs leave the file alone.** The cron fires ~20×/day;
-  if nothing but ``captured_at`` would change, the file is not
-  rewritten, so the workflow's "anything to commit?" check stays quiet.
+* **One file per ET day, each team frozen at its tip-off.**
+  ``data/injury_snapshots/YYYY-MM-DD.jsonl`` holds the full league injury
+  list for that NBA day (the ET date — the key
+  ``historical_injuries.snapshot_date`` and ``Game.date`` use). A team's
+  lines keep updating until its game tips, then stay as they were at the
+  last pre-tip capture. Training joins this file to the same day's games,
+  so a list refreshed after tip-off leaked that night's in-game injuries
+  into the "pre-game" features (2026-10-05: an in-game injury was added at
+  the 02:14Z capture). Tip times come from ESPN's scoreboard; if it can't
+  be read, an existing day file is left untouched.
+* **No-change runs leave the file alone.** If nothing but ``captured_at``
+  would change, the file is not rewritten, so the workflow's "anything
+  to commit?" check stays quiet.
 * **Import replaces the day.** ``import_injuries_jsonl`` groups records
   by ``snapshot_date`` and upserts each day through
   ``persist_historical_injuries`` (delete-day + insert), so re-importing
@@ -31,7 +34,7 @@ Design:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from nba_betting.data.polymarket import NBA_TZ
@@ -70,23 +73,78 @@ def _content_key(lines: list[str]) -> list[str]:
     return out
 
 
+_FETCH = object()   # sentinel: look tip-off status up on ESPN
+
+
+def _started_teams(now: datetime) -> set[str] | None:
+    """Abbreviations of teams whose ET-today game has tipped (or is past its
+    scheduled tip), from ESPN's scoreboard. ``None`` if it can't be read."""
+    from nba_betting.data.espn import fetch_scoreboard
+
+    day = now.astimezone(NBA_TZ).date()
+    try:
+        events = fetch_scoreboard(day.strftime("%Y%m%d"))
+    except Exception:  # noqa: BLE001 — network failure
+        return None
+    started: set[str] = set()
+    for ev in events:
+        status = ev.get("status") or ""
+        if status in ("STATUS_POSTPONED", "STATUS_CANCELED"):
+            continue
+        tip = None
+        raw = ev.get("date") or ""
+        try:
+            tip = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+        except ValueError:
+            pass
+        if tip is not None and tip.tzinfo is None:
+            tip = tip.replace(tzinfo=timezone.utc)
+        if status != "STATUS_SCHEDULED" or (tip is not None and tip <= now):
+            for side in ("home_team", "away_team"):
+                abbr = ((ev.get(side) or {}).get("abbr") or "").upper()
+                if abbr:
+                    started.add(abbr)
+    return started
+
+
+def _read_records(path: Path) -> list[dict] | None:
+    if not path.exists():
+        return None
+    out = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        if ln.strip():
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
 def capture_injuries_to_jsonl(
     out_dir: Path | str = DEFAULT_INJURY_SNAPSHOT_DIR,
     *,
     timestamp: datetime | None = None,
     injuries: list | None = None,
+    started_teams=_FETCH,
 ) -> dict:
     """Fetch the ESPN injury report (with depth-chart impact ratings) and
-    write today's (ET) full list to ``<out_dir>/<YYYY-MM-DD>.jsonl``.
+    write today's (ET) list to ``<out_dir>/<YYYY-MM-DD>.jsonl``, keeping
+    each already-tipped team's lines as they were before its tip-off.
 
     Args:
         out_dir: Directory for the per-day files (created if missing).
         timestamp: UTC capture time; defaults to now. Exposed for tests.
         injuries: Pre-built ``PlayerInjury`` list (skips ESPN). For tests.
+        started_teams: Abbreviations of teams whose game today has tipped;
+            ``None`` = unknown. Default: read from ESPN's scoreboard.
 
-    Returns ``{snapshot_date, players, written, unchanged, path, warnings}``
-    — ``written`` is the number of lines written (0 when the file was
-    left untouched because nothing changed or nothing was fetched).
+    For a tipped team the lines come from today's file if it exists, else
+    from the previous day's file (last night's list — stale but pre-tip);
+    only if neither exists is the current list used, with a warning.
+
+    Returns ``{snapshot_date, players, written, unchanged, frozen_teams,
+    path, warnings}`` — ``written`` is the number of lines written (0 when
+    the file was left untouched).
     """
     now = timestamp or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -110,6 +168,7 @@ def capture_injuries_to_jsonl(
         "players": len(injuries),
         "written": 0,
         "unchanged": False,
+        "frozen_teams": [],
         "path": str(path.resolve()),
         "warnings": warnings,
     }
@@ -117,13 +176,44 @@ def capture_injuries_to_jsonl(
         warnings.append("no injuries returned; file left untouched")
         return result
 
-    captured_at = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ordered = sorted(injuries, key=lambda i: ((i.team_abbr or ""), i.player_name.lower()))
-    lines = [json.dumps(_record(i, snapshot_date, captured_at), sort_keys=True) for i in ordered]
+    existing = _read_records(path)
+    if started_teams is _FETCH:
+        started_teams = _started_teams(now)
+    if started_teams is None and existing is not None:
+        warnings.append(
+            "tip-off times unavailable (ESPN scoreboard failed); kept the "
+            "existing file so post-tip news can't leak into it"
+        )
+        result["unchanged"] = True
+        return result
+    frozen = {t.upper() for t in (started_teams or ())}
 
-    if path.exists():
-        existing = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        if _content_key(existing) == _content_key(lines):
+    captured_at = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = [_record(i, snapshot_date, captured_at) for i in injuries]
+    merged = fresh
+    if frozen:
+        base = existing
+        if base is None:
+            prev = _read_records(out / f"{(snapshot_date - timedelta(days=1)).isoformat()}.jsonl")
+            base = [dict(r, snapshot_date=snapshot_date.isoformat()) for r in prev] if prev else None
+        if base is None:
+            warnings.append(
+                f"no pre-tip injury capture for {', '.join(sorted(frozen))}; "
+                "using the current list"
+            )
+        else:
+            merged = (
+                [r for r in fresh if r["team_abbr"] not in frozen]
+                + [r for r in base if (r.get("team_abbr") or "").upper() in frozen]
+            )
+            result["frozen_teams"] = sorted(frozen)
+
+    merged.sort(key=lambda r: ((r.get("team_abbr") or ""), (r.get("player_name") or "").lower()))
+    lines = [json.dumps(r, sort_keys=True) for r in merged]
+
+    if existing is not None:
+        old_lines = [json.dumps(r, sort_keys=True) for r in existing]
+        if _content_key(old_lines) == _content_key(lines):
             result["unchanged"] = True
             return result
 

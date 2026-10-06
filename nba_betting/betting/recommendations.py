@@ -133,6 +133,7 @@ def generate_recommendations(
     # Check if predict_fn accepts team ID kwargs
     _accepts_ids = "home_id" in inspect.signature(predict_fn).parameters
 
+    from nba_betting.data.espn_odds import market_home_prob as market_home_prob_espn
     from nba_betting.data.polymarket import (
         game_date_et,
         index_odds_by_pair,
@@ -192,8 +193,9 @@ def generate_recommendations(
             teams = market_match.get("teams", {})
             market_home_prob = teams.get(home_abbr, 0.0)
             market_away_prob = teams.get(away_abbr, 0.0)
-        elif espn_match:
-            # Fallback to ESPN odds
+        elif espn_match and market_home_prob_espn(espn_match, home_abbr) is not None:
+            # Fallback to ESPN's moneyline. A spread-only ESPN line is NOT
+            # a price: betting against the 2.5%/pt proxy invents edges.
             teams = espn_match.get("teams", {})
             market_home_prob = teams.get(home_abbr, 0.0)
             market_away_prob = teams.get(away_abbr, 0.0)

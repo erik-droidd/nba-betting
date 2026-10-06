@@ -120,8 +120,13 @@ nba_betting/
 │   │                              charts, rosters, team summaries.
 │   │                              Handles ESPN abbr ↔ NBA abbr mapping.
 │   ├── espn_odds.py            — Extracts moneyline + spread + O/U from
-│   │                              ESPN scoreboard. Used as fallback when
-│   │                              Polymarket has no market for a game.
+│   │                              ESPN scoreboard (moneyline lives in
+│   │                              `odds.moneyline.<side>.close.odds`).
+│   │                              `prob_source` flags the 2.5%/pt spread
+│   │                              proxy; `market_home_prob()` is what
+│   │                              snapshot writers store, so the proxy
+│   │                              never lands in odds_snapshots. Used as
+│   │                              fallback when Polymarket has no market.
 │   ├── injuries.py             — PlayerInjury dataclass + JSON persistence
 │   │                              + ESPN sync. Preserves manual overrides.
 │   │                              get_team_injury_adjustment(abbr) returns
@@ -141,21 +146,28 @@ nba_betting/
 │   │                              path since 2026-09 — availability comes
 │   │                              from player_game_stats (§4.10).
 │   └── odds_tracker.py         — snapshot_current_odds / get_line_movement
-│                                 (opening-vs-current spread & prob).
+│                                 (opening-vs-current spread & prob;
+│                                 prob_movement within ONE source).
 │                                 snapshot_game_date() is the ONE key
 │                                 (game's ET date = Game.date) used for
 │                                 filing and for every lookup.
 │                                 batch_closing_lines() loads the latest
 │                                 snapshot per (game, source) in one query.
 │   ├── snapshot_jsonl.py       — DB-free odds capture (GH Actions) +
-│   │                              importer that re-resolves each record
-│   │                              to the real game.
-│   └── injury_jsonl.py         — DB-free DAILY injury capture (GH
-│                                 Actions, same cron): one ET-dated file
-│                                 per day, latest capture wins, untouched
-│                                 when unchanged; importer replaces the
-│                                 day in historical_injuries. This is
-│                                 what makes the injury features accumulate.
+│   │                              importer (key: home, away, source,
+│   │                              timestamp) that matches each record to
+│   │                              its game from the record's own ET
+│   │                              game_date, + one-off repair_snapshots().
+│   ├── snapshot_loop.py        — The GH Actions run: captures paced on the
+│   │                              next tip-off (30/15/5 min), stops idle
+│   │                              or on budget (→ successor dispatch).
+│   └── injury_jsonl.py         — DB-free DAILY injury capture (same
+│                                 loop): one ET-dated file per day, each
+│                                 team's lines frozen at its tip-off,
+│                                 untouched when unchanged; importer
+│                                 replaces the day in historical_injuries.
+│                                 This is what makes the injury features
+│                                 accumulate.
 │                                 Auto-deduplicates: skips snapshot if
 │                                 prices moved < 0.5% within a 4h window.
 │
@@ -320,8 +332,8 @@ trained_models/
   ensemble_weight.joblib    OOF-learned Elo weight for the log-odds blend
   ensemble_meta.joblib      Stacked meta-learner (fitted, not wired — §5.4)
   spread_regressor.joblib / total_regressor.joblib / regressor_feature_cols.joblib
-data/injury_snapshots/      Daily ESPN injury JSONL from the cron (committed)
-data/odds_snapshots/        Odds JSONL from the cron (committed)
+data/injury_snapshots/      Daily ESPN injury JSONL from the GH Actions loop (committed)
+data/odds_snapshots/        Odds JSONL from the GH Actions loop (committed)
 frontend/
   index.html                Single-file dashboard, fetches /api/*
 USAGE.md                    End-user facing operational guide
@@ -1260,14 +1272,20 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (138 tests across fourteen files).
+# 7. Full test suite (183 tests across seventeen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 138 passed in < 5s.
+# Expect: 183 passed in < 5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
-# test_snapshot_jsonl.py     — 15 tests (JSONL round-trip, idempotence,
-#   ESPN fallback, Polymarket date disambiguation)
+# test_snapshot_jsonl.py     — 25 tests (JSONL round-trip, idempotence on
+#   the capture key, record-date game matching, legacy ESPN proxy blanking,
+#   repair_snapshots, ESPN-only slate, stamp-after-fetch, heartbeat dedupe)
+# test_snapshot_loop.py      — 16 tests (tip-paced cadence, idle vs budget
+#   stop, fetch-failure retries, error tolerance, push throttling)
+# test_espn_odds.py          — 15 tests (current + legacy ESPN moneyline
+#   shapes, de-vig, spread-proxy flag, single-source prob_movement,
+#   no bets priced off the spread proxy)
 # test_tier_improvements.py  — 14 tests (off/def Elo, EWM, meta-learner,
 #   signal-dependent Kelly, portfolio Kelly, dedup, fuzzy matching, cache)
 # test_montecarlo.py         — 12 tests (empirical bootstrap, market-null,
@@ -1283,7 +1301,8 @@ print('OK')
 #   build_prediction_features uses the FINAL rest values)
 # test_season_and_snapshot_dates.py — 3 tests (season_for_date rollover,
 #   snapshot_game_date ET keying)
-# test_injury_jsonl.py       —  6 tests (daily injury JSONL capture/import)
+# test_injury_jsonl.py       — 10 tests (daily injury JSONL capture/import,
+#   per-team tip-off freeze, scoreboard tip detection)
 # test_injury_sync.py        —  4 tests (ESPN id recovery, manual-override
 #   flag, case-insensitive statuses)
 # test_availability.py       —  5 tests (leak-free availability features,
@@ -1689,10 +1708,11 @@ Review pass after both data streams reached `READY` tier:
   running. Old training games have `injury_impact_*` = 0; the model
   learns to treat that as "unknown, average" but the feature will only
   become truly predictive once it has a season or two of real data
-  under it. Since 2026-09 the GitHub Actions cron captures the full
-  ESPN list every firing (`snapshot-injuries --jsonl`, imported by
-  `import-snapshots`), so coverage no longer depends on the user
-  running `predict` — 33 days of coverage in five seasons before that.
+  under it. Since 2026-09 the GitHub Actions workflow captures the full
+  ESPN list (since 2026-10 inside the snapshot loop, each team frozen at
+  its tip-off; imported by `import-snapshots`), so coverage no longer
+  depends on the user running `predict` — 33 days of coverage in five
+  seasons before that.
 - **Meta-learner requires WF data to train** — `ensemble_meta.joblib`
   is only produced when there are sufficient out-of-fold folds. On a
   fresh install with limited history, the system silently falls back to
@@ -1948,3 +1968,78 @@ it self-corrects after five games.
   after a season of the snapshot cron; it will set
   `MARKET_SHRINKAGE_LAMBDA` empirically and decide whether spread picks
   deserve a stake.
+
+### 10.1h Snapshot pipeline audit (2026-10)
+
+An end-to-end check of the GH Actions snapshot pipeline (runs, logs,
+committed files, local DB) found it technically healthy (219/220 runs
+green since 2026-09-01, everything imported) but logically short of its
+purpose — real closing lines and leak-free injury snapshots.
+
+- **ESPN moneylines were never parsed.** ESPN moved them from
+  `homeTeamOdds.moneyLine` to `moneyline.<side>.close.odds` (American-odds
+  strings); `espn.py` read only the old field, so every ESPN `home_prob`
+  since at least 2026-04 (all 645 rows) was the 2.5%/pt spread proxy —
+  e.g. a -1.5 pick'em at -110/-110 stored as 0.5375. That fed
+  `odds_disagreement` (train + live), the market-eval fallback and the
+  live recommendation fallback. Fix: `espn._moneyline()` reads both
+  shapes; `get_espn_odds` flags `prob_source`; writers store only
+  `market_home_prob()` (proxy → NULL) plus raw moneylines in the JSONL,
+  and `generate_recommendations` no longer treats a spread-only ESPN line
+  as a market price (no edge, no stake).
+- **The cron grid didn't fire.** GitHub delivered ~6 of 33 slots/day,
+  hours late (none 09-15 UTC; 55 runs 04-09 UTC with no slot), so the
+  last capture before a 7 PM ET tip was a median 97 min old (≤ 30 min on
+  1 day in 17). The 7-min offset hadn't helped (~15% → ~18%). Fix: one
+  self-paced job per run (`snapshot-loop`, `data/snapshot_loop.py`):
+  30/15/5-min cadence keyed on the next tip, 5.5 h budget, successor
+  dispatched via `workflow_dispatch` (GITHUB_TOKEN may trigger it), idle
+  stop when nothing tips within 12 h, hourly cron as the restarter.
+  Unchanged lines are rewritten at most every 30 min (heartbeat).
+- **Each run wasted ~4.6 min** on stats.nba.com read timeouts (30 s × 3
+  retries × 3 dates) — it doesn't return empty to datacenter IPs, it
+  hangs. Fix: `--skip-nba-api` (ESPN-only slate) on the runner; records
+  are now stamped after the odds are fetched (they were stamped ~4.6 min
+  early); ESPN odds are fetched for the slate's date (after the night's
+  tips the default scoreboard was still tonight, so tomorrow's games had
+  no ESPN line).
+- **Wrong-game matching + duplicates.** The importer anchored on the
+  capture's UTC date, so an 8 PM ET capture (00:xx UTC) skipped tonight's
+  game and was filed under the pair's next meeting — 36 rows, all
+  closing lines of 2026 playoff games filed under the next game of the
+  series. Its key included that derived `game_date`, leaving 53
+  duplicates. Fix: match from the record's own `game_date` (ET; legacy
+  records carry the UTC tip date = ET + 1, so also try the day before,
+  never earlier than the capture's ET day; no window fallback, which
+  would attach late-preseason captures to opening-week rematches); key =
+  (home, away, source, timestamp).
+- **Injury leakage.** The day file was rewritten until midnight ET —
+  after tip-off — so in-game injuries entered that day's list, which
+  training joins to that day's games (2026-10-05: one added at 02:14Z).
+  Fix: each team's lines freeze at its tip (ESPN scoreboard); a day file
+  is never overwritten when tip times are unknown.
+- **`prob_movement` mixed sources.** Both sources share each capture's
+  timestamp, so first/last over all rows was first-Polymarket vs
+  last-ESPN. Now within one source (Polymarket, else ESPN).
+- **Workflow robustness.** Scheduled checkout used the trigger-time SHA
+  (`ref: main` now); a failed rebase was never aborted, so retries were
+  futile (the one red run, 2026-09-13); odds JSONL merges as a union
+  (`.gitattributes`), injury files take the newer capture (`-X theirs`).
+  checkout/setup-python v4/v5 → v7 (Node 20 deprecation).
+
+**Data repair.** `repair-snapshots` (idempotent) on the local DB: 53
+duplicates removed, 30 rows re-filed (28 series misfilings + 2 old local
+`predict` rows dated by UTC), 623 ESPN proxy probs set to NULL. After it:
+0 duplicates, 0 rows whose `game_date` disagrees with their game, and a
+from-scratch import reproduces the repaired table exactly (1612 rows,
+0 differences). `market-eval` on the repaired data (n=125 moneyline /
+108 spread-total): model 0.2113 vs market 0.2128 Brier (t −0.15 — still
+ties the close), λ=0.60 still best (0.5989 log-loss), spread MAE 12.59 vs
+12.80, total MAE 15.49 vs 14.09 (t +2.3, book better). Conclusions
+unchanged; verdict still withheld below 300 games.
+
+**Not re-run:** `train`. The line-movement features changed for the 136
+snapshot-era games (proxy ESPN probs gone, single-source
+`prob_movement`); they are zero for every other training game, so the
+effect is tiny, but the next `train` makes the saved model consistent.
+

@@ -287,7 +287,7 @@ def test_capture_writes_jsonl_without_touching_db(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: fake_espn,
+        lambda *a, **kw: fake_espn,
     )
 
     out_dir = tmp_path / "captured"
@@ -358,7 +358,7 @@ def test_capture_roundtrip_then_import(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: fake_espn,
+        lambda *a, **kw: fake_espn,
     )
 
     out_dir = tmp_path / "captured"
@@ -482,7 +482,7 @@ def test_capture_falls_back_to_espn_when_nba_api_empty(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: [],
+        lambda *a, **kw: [],
     )
 
     out_dir = tmp_path / "captured"
@@ -540,7 +540,7 @@ def test_capture_prefers_nba_api_when_it_returns_games(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: [],
+        lambda *a, **kw: [],
     )
 
     result = jsonl.capture_snapshot_to_jsonl(
@@ -587,7 +587,7 @@ def test_espn_fallback_strips_event_id_so_import_is_safe(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: [],
+        lambda *a, **kw: [],
     )
 
     out_dir = tmp_path / "captured"
@@ -677,7 +677,7 @@ def test_capture_picks_right_polymarket_event_when_pair_has_multiple_dates(tmp_p
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: [],
+        lambda *a, **kw: [],
     )
 
     out_dir = tmp_path / "captured"
@@ -738,7 +738,7 @@ def test_capture_skips_ambiguous_polymarket_when_no_date_match(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         "nba_betting.data.espn_odds.get_espn_odds",
-        lambda: [],
+        lambda *a, **kw: [],
     )
 
     out_dir = tmp_path / "captured"
@@ -768,83 +768,296 @@ def test_parse_timestamp_drops_tz_to_match_existing_rows():
     assert ts_z == ts_offset == ts_naive
 
 
-def test_import_resolves_misfiled_pretipoff_date_to_upcoming_game(tmp_path, monkeypatch):
-    """The join bug: pre-tipoff snapshots are filed under the capture/UTC
-    date, not the game's ET date, so they never join (2%-coverage bug).
-    Import must re-resolve to the DB game — and when a recent PAST game and an
-    UPCOMING game both exist for the pair, pick the upcoming one (the snapshot
-    was captured before its tipoff)."""
-    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
-    _seed_teams(session_module)
-
-    from datetime import date as _date
-    from nba_betting.db.models import Game, OddsSnapshot
-    from sqlalchemy import select
-
+def _add_games(session_module, games):
+    """games: [(id, date)] for the BOS(home)-LAL(away) pair."""
+    from nba_betting.db.models import Game
     sess = session_module.get_session()
     try:
-        # A played game 1 day before the capture, and the real upcoming game.
-        sess.add(Game(id="0042500041", home_team_id=1610612738, away_team_id=1610612747,
-                      date=_date(2026, 4, 15), season="2025-26",
-                      home_score=101, away_score=99))
-        sess.add(Game(id="0042500042", home_team_id=1610612738, away_team_id=1610612747,
-                      date=_date(2026, 4, 18), season="2025-26"))
+        for gid, d in games:
+            sess.add(Game(id=gid, home_team_id=1610612738, away_team_id=1610612747,
+                          date=d, season="2025-26"))
         sess.commit()
     finally:
         sess.close()
 
-    # Snapshot captured 2026-04-16 (pre-tipoff for the 04-18 game), but the
-    # JSONL game_date is wrong (the capture date).
-    rec = {
-        "game_date": "2026-04-16", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
-        "source": "polymarket", "timestamp": "2026-04-16T13:07:00",
-        "home_prob": 0.62, "spread": None, "over_under": None, "game_id": None,
-    }
-    jsonl_path = tmp_path / "snapshots" / "2026-04-16.jsonl"
-    _write_jsonl(jsonl_path, [rec])
 
-    assert jsonl.import_snapshots_jsonl(jsonl_path)["imported"] == 1
-
+def _rows(session_module):
+    from nba_betting.db.models import OddsSnapshot
+    from sqlalchemy import select
     sess = session_module.get_session()
     try:
-        row = sess.execute(select(OddsSnapshot)).scalars().one()
-        assert row.game_date == _date(2026, 4, 18)   # snapped to the upcoming game's ET date
-        assert row.game_id == "0042500042"             # linked to the upcoming game, not 0042500041
+        return [(r.game_date, r.game_id, r.source, r.home_prob)
+                for r in sess.execute(select(OddsSnapshot).order_by(OddsSnapshot.id)).scalars()]
     finally:
         sess.close()
 
 
-def test_reresolve_existing_snapshots_fixes_misfiled_rows(tmp_path, monkeypatch):
-    """The one-time migration must re-date already-stored rows in place."""
+def test_import_files_late_tip_capture_under_tonights_game_not_the_next_one(tmp_path, monkeypatch):
+    """The 2026 playoff bug: an 8:06 PM ET capture (00:06Z next day) for
+    Game 3 was filed under Game 4, two days later at the same arena, because
+    the resolver anchored on the capture's UTC date. Both record formats —
+    current (ET game date) and pre-2026-05-29 (UTC tip date, ET + 1) — must
+    land on tonight's game."""
+    from datetime import date as _date
     session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
     _seed_teams(session_module)
+    _add_games(session_module, [("G3", _date(2026, 4, 23)), ("G4", _date(2026, 4, 25))])
 
+    base = {"home_team_abbr": "BOS", "away_team_abbr": "LAL", "source": "polymarket",
+            "timestamp": "2026-04-24T00:06:01", "home_prob": 0.6,
+            "spread": None, "over_under": None, "game_id": None}
+    _write_jsonl(tmp_path / "s" / "a.jsonl", [
+        dict(base, game_date="2026-04-23"),                               # ET format
+        dict(base, game_date="2026-04-24", timestamp="2026-04-24T00:07:00"),  # legacy UTC format
+    ])
+    assert jsonl.import_snapshots_jsonl(tmp_path / "s")["imported"] == 2
+    assert [r[:2] for r in _rows(session_module)] == [(_date(2026, 4, 23), "G3")] * 2
+
+
+def test_import_never_guesses_a_game_the_record_date_does_not_name(tmp_path, monkeypatch):
+    """A late-preseason capture must not attach to an opening-week rematch
+    of the same pair: no game on the record's date (or the day before) means
+    unmatched, kept under its own date for `sync` to link later."""
+    from datetime import date as _date
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    _add_games(session_module, [("REG1", _date(2026, 10, 20))])
+
+    _write_jsonl(tmp_path / "s" / "a.jsonl", [{
+        "game_date": "2026-10-17", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
+        "source": "polymarket", "timestamp": "2026-10-17T18:00:00", "home_prob": 0.55,
+        "spread": None, "over_under": None, "game_id": None,
+    }])
+    jsonl.import_snapshots_jsonl(tmp_path / "s")
+    assert _rows(session_module) == [(_date(2026, 10, 17), None, "polymarket", 0.55)]
+
+
+def test_import_key_ignores_derived_game_date_so_reimport_never_duplicates(tmp_path, monkeypatch):
+    """Import before the game is synced (unmatched), then again after: the
+    second pass must skip, not insert a copy under the resolved date."""
+    from datetime import date as _date
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    _write_jsonl(tmp_path / "s" / "a.jsonl", [{
+        "game_date": "2026-04-19", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
+        "source": "polymarket", "timestamp": "2026-04-19T22:00:00", "home_prob": 0.6,
+        "spread": None, "over_under": None, "game_id": None,
+    }])
+    assert jsonl.import_snapshots_jsonl(tmp_path / "s")["imported"] == 1
+    _add_games(session_module, [("G1", _date(2026, 4, 18))])   # legacy +1 date resolves here
+    second = jsonl.import_snapshots_jsonl(tmp_path / "s")
+    assert (second["imported"], second["skipped"]) == (0, 1)
+    assert len(_rows(session_module)) == 1
+
+
+def test_import_nulls_legacy_espn_spread_proxy_but_keeps_moneyline_probs(tmp_path, monkeypatch):
+    """Before the 2026-10 fix every ESPN home_prob was the 2.5%/pt spread
+    proxy (ESPN had moved its moneylines). Those must not import as market
+    prices; post-fix records (with moneyline fields) keep theirs."""
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    common = {"game_date": "2026-04-19", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
+              "source": "espn", "over_under": 220.5, "game_id": None}
+    _write_jsonl(tmp_path / "s" / "a.jsonl", [
+        dict(common, timestamp="2026-04-19T18:00:00", home_prob=0.5875, spread=-3.5),
+        dict(common, timestamp="2026-04-19T19:00:00", home_prob=0.5875, spread=-3.5,
+             home_moneyline=-150.0, away_moneyline=130.0),
+    ])
+    jsonl.import_snapshots_jsonl(tmp_path / "s")
+    assert [r[3] for r in _rows(session_module)] == [None, 0.5875]
+
+
+def test_reresolve_links_unmatched_rows_once_their_game_is_synced(tmp_path, monkeypatch):
+    """`sync` path: rows imported before their game existed get linked."""
     from datetime import date as _date, datetime as _dt
-    from nba_betting.db.models import Game, OddsSnapshot
-    from sqlalchemy import select
-
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    from nba_betting.db.models import OddsSnapshot
     sess = session_module.get_session()
     try:
-        sess.add(Game(id="0042500042", home_team_id=1610612738, away_team_id=1610612747,
-                      date=_date(2026, 4, 18), season="2025-26"))
-        # A row stored under the WRONG (capture) date with no game_id.
         sess.add(OddsSnapshot(
-            game_id=None, game_date=_date(2026, 4, 16),
+            game_id=None, game_date=_date(2026, 4, 18),
             home_team_id=1610612738, away_team_id=1610612747,
-            source="polymarket", timestamp=_dt(2026, 4, 16, 13, 7, 0),
-            home_prob=0.62,
+            source="polymarket", timestamp=_dt(2026, 4, 18, 13, 7, 0), home_prob=0.62,
         ))
         sess.commit()
     finally:
         sess.close()
+    _add_games(session_module, [("0042500042", _date(2026, 4, 18))])
 
-    out = jsonl.reresolve_existing_snapshots()
+    out = jsonl.reresolve_existing_snapshots(only_unmatched=True)
     assert out["updated"] == 1 and out["unmatched"] == 0
+    assert _rows(session_module)[0][:2] == (_date(2026, 4, 18), "0042500042")
 
+
+def test_repair_dedupes_refiles_and_nulls_spread_proxies(tmp_path, monkeypatch):
+    """The one-off repair: collapse duplicate captures, move a closing line
+    the old resolver filed under the next series game back to its game
+    (from the JSONL record), NULL spread-proxy ESPN probs — and re-date rows
+    that aren't in any file (local `predict` captures) from their game_id.
+    Dry run changes nothing; a second real run changes nothing either."""
+    from datetime import date as _date, datetime as _dt
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    _add_games(session_module, [("G3", _date(2026, 4, 23)), ("G4", _date(2026, 4, 25))])
+    from nba_betting.db.models import OddsSnapshot
+
+    ts = _dt(2026, 4, 24, 0, 6, 1)
     sess = session_module.get_session()
     try:
-        row = sess.execute(select(OddsSnapshot)).scalars().one()
-        assert row.game_date == _date(2026, 4, 18)
-        assert row.game_id == "0042500042"
+        for _ in range(2):   # misfiled under G4, twice (duplicate)
+            sess.add(OddsSnapshot(game_id="G4", game_date=_date(2026, 4, 25),
+                                  home_team_id=1610612738, away_team_id=1610612747,
+                                  source="espn", timestamp=ts, home_prob=0.5875, spread=-3.5))
+        sess.add(OddsSnapshot(game_id="G4", game_date=_date(2026, 4, 26),   # local predict row,
+                              home_team_id=1610612738, away_team_id=1610612747,  # UTC-dated
+                              source="polymarket", timestamp=_dt(2026, 4, 26, 0, 30, 0, 123456),
+                              home_prob=0.61))
+        sess.commit()
     finally:
         sess.close()
+    _write_jsonl(tmp_path / "s" / "a.jsonl", [{
+        "game_date": "2026-04-24", "home_team_abbr": "BOS", "away_team_abbr": "LAL",
+        "source": "espn", "timestamp": "2026-04-24T00:06:01", "home_prob": 0.5875,
+        "spread": -3.5, "over_under": 220.5, "game_id": None,
+    }])
+
+    dry = jsonl.repair_snapshots(tmp_path / "s", dry_run=True)
+    assert (dry["duplicates_removed"], dry["rematched"], dry["espn_probs_nulled"]) == (1, 2, 1)
+    assert len(_rows(session_module)) == 3
+
+    res = jsonl.repair_snapshots(tmp_path / "s")
+    assert (res["duplicates_removed"], res["rematched"], res["espn_probs_nulled"]) == (1, 2, 1)
+    assert _rows(session_module) == [
+        (_date(2026, 4, 23), "G3", "espn", None),
+        (_date(2026, 4, 25), "G4", "polymarket", 0.61),
+    ]
+    again = jsonl.repair_snapshots(tmp_path / "s")
+    assert (again["duplicates_removed"], again["rematched"], again["espn_probs_nulled"]) == (0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 audit: capture behaviour on the GitHub runner
+# ---------------------------------------------------------------------------
+
+
+def _espn_slate(date_utc="2026-10-07T23:30Z"):
+    return [{
+        "espn_event_id": 1, "date": date_utc, "status": "STATUS_SCHEDULED",
+        "home_team": {"espn_id": 2, "abbr": "BOS", "name": "Celtics"},
+        "away_team": {"espn_id": 13, "abbr": "LAL", "name": "Lakers"},
+        "odds": {},
+    }]
+
+
+def _patch_sources(monkeypatch, *, espn_odds, poly=(), nba_api_calls=None, slate=None):
+    def _nba(*a, **kw):
+        if nba_api_calls is not None:
+            nba_api_calls.append(1)
+        return []
+    monkeypatch.setattr("nba_betting.data.nba_stats.fetch_todays_games", _nba)
+    monkeypatch.setattr("nba_betting.data.nba_stats.fetch_upcoming_games", _nba)
+    monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard",
+                        lambda date_str=None: slate if slate is not None else _espn_slate())
+    monkeypatch.setattr("nba_betting.data.polymarket.get_nba_odds", lambda: list(poly))
+    monkeypatch.setattr("nba_betting.data.espn_odds.get_espn_odds", espn_odds)
+
+
+def test_capture_skip_nba_api_never_touches_stats_nba_com(tmp_path, monkeypatch):
+    """On the runner every stats.nba.com call hung for its 30 s timeout x3
+    retries x3 dates (~4.6 min per capture)."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+    calls: list = []
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [], nba_api_calls=calls)
+    res = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True,
+                                          timestamp=datetime(2026, 10, 7, 12, 0))
+    assert calls == []
+    assert res["games"] == 1 and res["source"] == "espn" and res["notes"] == []
+
+
+def test_capture_stores_only_market_espn_probs_and_raw_moneylines(tmp_path, monkeypatch):
+    """A spread-only ESPN line keeps its spread/total but no home_prob; a
+    moneyline line keeps the de-vigged prob plus the raw American odds."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+    spread_only = [{"teams": {"BOS": 0.5875, "LAL": 0.4125}, "prob_source": "spread",
+                    "home_moneyline": None, "away_moneyline": None,
+                    "spread": -3.5, "over_under": 221.5}]
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: spread_only)
+    jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
+    with_ml = [{"teams": {"BOS": 0.645, "LAL": 0.355}, "prob_source": "moneyline",
+                "home_moneyline": -205.0, "away_moneyline": 170.0,
+                "spread": -5.5, "over_under": 212.5}]
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: with_ml)
+    jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 13, 0))
+
+    recs = [json.loads(l) for l in (tmp_path / "2026-10-07.jsonl").read_text().splitlines()]
+    assert [(r["home_prob"], r["spread"], r["home_moneyline"]) for r in recs] == [
+        (None, -3.5, None), (0.645, -5.5, -205.0),
+    ]
+
+
+def test_capture_fetches_espn_odds_for_the_slate_date(tmp_path, monkeypatch):
+    """After tonight's games tip, the slate is tomorrow's — ESPN's default
+    (current) scoreboard is still tonight, so ask for the slate's date."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+    asked: list = []
+
+    def _espn(date_str=None):
+        asked.append(date_str)
+        return []
+    # 2026-10-08T02:00Z is 10 PM ET on Oct 7.
+    _patch_sources(monkeypatch, espn_odds=_espn, slate=_espn_slate("2026-10-08T02:00Z"))
+    jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
+    assert asked == ["20261007"]
+
+
+def test_capture_stamps_records_after_the_odds_are_fetched(tmp_path, monkeypatch):
+    from datetime import timezone as _tz
+    from nba_betting.data import snapshot_jsonl as jsonl
+    state = {"fetched": False}
+
+    def _poly():
+        state["fetched"] = True
+        return [{"teams": {"BOS": 0.6, "LAL": 0.4}, "game_date": "2026-10-07"}]
+
+    def _clock():
+        assert state["fetched"], "timestamp taken before the odds were fetched"
+        return datetime(2026, 10, 7, 12, 4, 37, tzinfo=_tz.utc)
+
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [])
+    monkeypatch.setattr("nba_betting.data.polymarket.get_nba_odds", _poly)
+    jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, clock=_clock)
+    rec = json.loads((tmp_path / "2026-10-07.jsonl").read_text())
+    assert rec["timestamp"] == "2026-10-07T12:04:37"
+
+
+def test_capture_dedupes_unchanged_lines_until_heartbeat(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from nba_betting.data import snapshot_jsonl as jsonl
+    poly = [{"teams": {"BOS": 0.6, "LAL": 0.4}, "game_date": "2026-10-07"}]
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [], poly=poly)
+    state: dict = {}
+    hb = timedelta(minutes=30)
+    out = [jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, last_written=state,
+                                           heartbeat=hb, timestamp=datetime(2026, 10, 7, 12, m))
+           for m in (0, 5, 31)]
+    assert [(o["written"], o["deduped"]) for o in out] == [(1, 0), (0, 1), (1, 0)]
+    poly[0]["teams"]["BOS"] = 0.62     # a moved line is always written
+    moved = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, last_written=state,
+                                            heartbeat=hb, timestamp=datetime(2026, 10, 7, 12, 33))
+    assert moved["written"] == 1
+
+
+def test_capture_reports_next_tip_and_fetch_failure(tmp_path, monkeypatch):
+    from datetime import timezone as _tz
+    from nba_betting.data import snapshot_jsonl as jsonl
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [])
+    res = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
+    assert res["next_tip_utc"] == datetime(2026, 10, 7, 23, 30, tzinfo=_tz.utc)
+    assert res["games_fetch_failed"] is False
+
+    def _down(date_str=None):
+        raise ConnectionError("espn down")
+    monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard", _down)
+    res = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
+    assert res["games"] == 0 and res["games_fetch_failed"] is True

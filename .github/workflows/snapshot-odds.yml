@@ -1,117 +1,67 @@
 name: snapshot-odds
 
-# Runs odds snapshots on GitHub's infrastructure so they keep flowing
-# while the user (Europe-based) is asleep during the NBA overnight
-# window. The runner appends records to a JSONL file under
-# `data/odds_snapshots/` and commits them back to the repo; the user's
-# local machine picks them up with `git pull` and
-# `python3 -m nba_betting import-snapshots`.
+# Captures odds + the ESPN injury list on GitHub's infrastructure while the
+# user (Europe-based) is asleep during the NBA overnight window. Files land
+# in data/odds_snapshots/ and data/injury_snapshots/ and are committed back
+# to main; the user's machine loads them with
+# `python3 -m nba_betting import-snapshots --pull`.
 #
-# Cadence: shifted earlier + denser in the pre-tipoff window.
-# Rationale: the capture function filters to STATUS_SCHEDULED games
-# only (stats.nba.com `gameStatus==1` / ESPN `STATUS_SCHEDULED`), so
-# runs during the live-game window produced nothing useful — they
-# logged `games=0 no games scheduled` as warnings. The previous
-# 22:00–06:30 UTC schedule spent 12 of 19 daily runs inside the
-# live-game window (00:00–05:00 UTC) and had zero coverage of the
-# afternoon injury-news window (14:00–22:00 UTC) which is when sharp
-# action moves lines most.
+# Why a long-running loop instead of many cron slots: GitHub's scheduler
+# delivered ~6 of 33 slots per day, hours late (2026-09/10: no runs 09-15
+# UTC, 55 runs 04-09 UTC when nothing was scheduled), so the last capture
+# before a 7 PM ET tip was a median 97 min old. Now one run captures in a
+# loop paced on the next tip-off (every 30 / 15 / 5 min) for up to 5.5 h,
+# then dispatches its own successor — workflow_dispatch starts within
+# seconds, unlike cron — so the chain covers a game day end to end. When
+# nothing tips within 12 h (overnight, off days, offseason) the run stops
+# without a successor and the hourly cron below restarts the chain; cron
+# firings that arrive while a run is active wait as "pending" and are
+# cancelled when the successor is queued. Logic: nba_betting/data/snapshot_loop.py.
 #
-# New schedule (all UTC):
-#   13:00-17:00  hourly                — late-morning + early weekend tipoffs + Woj/Shams window
-#   18:00-21:30  every 30 min          — afternoon build-up (2–5:30 PM ET), heaviest injury-news hours
-#   22:00-01:45  every 15 min          — dense approach to + through ET tipoff cluster
-#   02:00-02:45  every 15 min          — West Coast closing line (10 PM ET tipoffs)
-#
-# Stops at 03:00 UTC: by then all ET games are live/final and West
-# Coast games have tipped off, so further snapshots capture nothing.
-# Picks back up at 13:00 UTC the next day, giving EU users a fresh
-# overnight commit history by morning.
-# Explicit `workflow_dispatch` for manual smoke testing from the Actions
-# tab — critical during offseason when cron can't be verified against a
-# real game. See USAGE.md §"Running snapshots remotely" for details.
-#
-# Note on GitHub's 60-day inactivity rule: scheduled workflows are
-# automatically disabled if the repo has no commits for 60 days. NBA
-# offseason (Jun–Oct) easily exceeds this. We mitigate in two ways:
-#   1. The workflow pushes a commit each day it runs, keeping activity
-#      visible.
-#   2. USAGE.md documents the manual re-enable step for the first run
-#      after offseason.
+# GitHub disables scheduled workflows after 60 days without repo activity.
+# The injury list changes almost daily, so commits keep the repo active;
+# if it ever is disabled, re-enable it in the Actions tab.
 
 on:
   schedule:
-    # IMPORTANT: all slots are offset 7 min off the hour boundary
-    # (`:07/:22/:37/:52` instead of `:00/:15/:30/:45`).
-    #
-    # Why: GitHub's scheduler is heavily congested at the top of every
-    # hour and on 15-min marks — it's their own documented guidance
-    # (https://docs.github.com/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule):
-    #     "Scheduled workflows may be delayed during periods of high
-    #      loads of GitHub Actions workflow runs. High load times
-    #      include the start of every hour. To decrease the chance of
-    #      delay, schedule your workflow to run at a different time."
-    #
-    # We verified this empirically: the initial round of this schedule
-    # (aligned to :00/:15/:30/:45) only fired ~15% of expected slots
-    # because firings were delayed past their successor and coalesced.
-    # Offsetting by 7 min puts us far from both the top-of-hour and
-    # quarter-hour congestion peaks.
-
-    # Morning + midday (hourly): late-morning injury-news window and
-    # early-afternoon weekend tipoffs (e.g. 1 PM ET Saturday = 17:00 UTC).
-    - cron: "7 13-17 * * *"
-    # Afternoon build-up (every 30 min, ~18:07–21:37 UTC = 2–5:30 PM ET):
-    # primary Woj/Shams drop window, sharp money often hits here.
-    - cron: "7,37 18-21 * * *"
-    # Dense approach to ET tipoff cluster (every 15 min, ~22:07–23:52 UTC):
-    # critical for CLV — need a fresh snapshot within minutes of tipoff.
-    - cron: "7,22,37,52 22,23 * * *"
-    # Through ET tipoffs + early West Coast pre-tipoff (~00:07–01:52 UTC):
-    # every 15 min. Captures closing line for 7:30/8 PM ET tipoffs
-    # during EDT, 7 PM ET tipoffs during EST.
-    - cron: "7,22,37,52 0,1 * * *"
-    # West Coast closing line (~02:07–02:52 UTC): every 15 min for
-    # 10 PM ET tipoffs. After 03:00 UTC all games are live → stop.
-    - cron: "7,22,37,52 2 * * *"
+    # Restarts the chain (e.g. the morning after an idle stop). Offset from
+    # :00 because GitHub's scheduler is most congested at the top of the hour.
+    - cron: "17 * * * *"
   workflow_dispatch:
-    # Manual trigger. Useful for smoke-testing the pipeline end-to-end
-    # before relying on cron, or capturing an ad-hoc snapshot.
     inputs:
       note:
         description: "Optional note (ignored; purely for audit)."
         required: false
         default: "manual"
 
-# Required since 2023 — default GITHUB_TOKEN perms became read-only.
-# Write is needed for the commit-back step below.
 permissions:
-  contents: write
+  contents: write   # commit snapshot files back to main
+  actions: write    # dispatch the successor run
 
 concurrency:
-  # Serialize runs so two cron firings (or a manual + cron overlap)
-  # never race on the same JSONL file. `cancel-in-progress: false`
-  # because we'd rather finish the earlier snapshot than drop it.
+  # One run at a time: never two loops appending to the same files.
   group: snapshot-odds
   cancel-in-progress: false
 
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # GitHub's hard limit is 360. The loop stops itself at --budget-minutes
+    # and leaves time for the final push + successor dispatch.
+    timeout-minutes: 350
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          # Need write access + the full ref so we can rebase + push
-          # back. fetch-depth: 0 isn't strictly required but keeps
-          # `git pull --rebase` simple.
+          # Without `ref`, a scheduled run checks out the commit that was
+          # main when it was *triggered*; a run queued for hours (2026-09-13)
+          # then starts from a stale tree and its push conflicts.
+          ref: main
           fetch-depth: 0
-          persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -121,58 +71,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Capture snapshot to JSONL
-        id: capture
-        run: |
-          python -m nba_betting snapshot-odds --jsonl data/odds_snapshots
-          # Record the file we expect to have touched for the commit step.
-          echo "day=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
-          echo "stamp=$(date -u +'%Y-%m-%d %H:%MZ')" >> "$GITHUB_OUTPUT"
-
-      - name: Capture injuries to JSONL
-        # Daily ESPN injury report -> data/injury_snapshots/<ET-date>.jsonl
-        # (latest capture of the day wins; untouched if unchanged). This is
-        # what grows `historical_injuries` — the training-side injury
-        # features — without the user running `predict`. Never blocks the
-        # odds snapshot: failures are logged and the step succeeds.
-        run: |
-          python -m nba_betting snapshot-injuries --jsonl data/injury_snapshots \
-            || echo "snapshot-injuries failed (non-fatal)"
-
-      - name: Commit & push
+      - name: Snapshot loop
+        id: loop
         env:
-          DAY: ${{ steps.capture.outputs.day }}
-          STAMP: ${{ steps.capture.outputs.stamp }}
+          PYTHONUNBUFFERED: "1"
+        # --skip-nba-api: stats.nba.com never answers GitHub's IPs; waiting
+        # out its timeouts cost ~4.6 min per capture.
         run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python -m nba_betting snapshot-loop \
+            --budget-minutes 330 \
+            --skip-nba-api \
+            --commit-cmd "bash .github/scripts/commit-snapshots.sh"
 
-          # If neither capture wrote anything (no games / network failure /
-          # unchanged injury list), don't commit — keeps history clean and
-          # avoids empty pushes.
-          if [ -z "$(git status --porcelain data/odds_snapshots/ data/injury_snapshots/)" ]; then
-            echo "no new snapshot data; nothing to commit"
-            exit 0
-          fi
-
-          # Odds file is UTC-dated, injury file is ET-dated: add both dirs
-          # rather than guessing filenames.
-          git add data/odds_snapshots/ data/injury_snapshots/
-          # [skip ci] prevents the push from retriggering this workflow.
-          git commit -m "chore(snapshots): ${STAMP} [skip ci]"
-
-          # Rebase-retry loop handles the race where two runs finish
-          # within seconds of each other (shouldn't happen given the
-          # concurrency group, but cheap insurance).
-          for attempt in 1 2 3; do
-            if git pull --rebase origin "${GITHUB_REF_NAME}" && \
-               git push origin "HEAD:${GITHUB_REF_NAME}"; then
-              echo "push succeeded on attempt ${attempt}"
-              exit 0
-            fi
-            echo "push attempt ${attempt} failed; retrying"
-            sleep $((attempt * 5))
-          done
-          echo "all push attempts failed"
-          exit 1
+      - name: Dispatch successor
+        # Only after a budget stop (games still ahead). `always()` keeps the
+        # chain going even if the loop step exits non-zero after deciding.
+        if: always() && steps.loop.outputs.continue == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run snapshot-odds.yml --ref main -f note=chain

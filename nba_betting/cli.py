@@ -1369,10 +1369,19 @@ def snapshot_odds(
         "--jsonl",
         help=(
             "Write to a JSONL file instead of the local DB. "
-            "Intended for the GitHub Actions cron runner (the user is in "
+            "Intended for the GitHub Actions runner (the user is in "
             "Europe and asleep during the NBA overnight window). Use "
             "`import-snapshots` to load the file into the local DB. "
             "Pass a directory path; defaults to data/odds_snapshots/."
+        ),
+    ),
+    skip_nba_api: bool = typer.Option(
+        False,
+        "--skip-nba-api",
+        help=(
+            "JSONL mode only: get the slate from ESPN alone. Use on GitHub "
+            "runners, where stats.nba.com never answers and each capture "
+            "otherwise waits ~4.6 min for its timeouts."
         ),
     ),
 ) -> None:
@@ -1399,7 +1408,7 @@ def snapshot_odds(
         )
 
         out_dir = jsonl if jsonl else str(DEFAULT_SNAPSHOT_DIR)
-        result = capture_snapshot_to_jsonl(out_dir)
+        result = capture_snapshot_to_jsonl(out_dir, skip_nba_api=skip_nba_api)
         # `notes` are informational (e.g. "used ESPN fallback" — which is
         # the expected path on GitHub Actions). They intentionally do NOT
         # escalate the status from ok → warn; a yellow "warn" label on an
@@ -1460,9 +1469,10 @@ def snapshot_injuries(
     upsert today's rows into the local `historical_injuries` table.
 
     `--jsonl DIR`: DB-free; writes/refreshes `DIR/<ET-date>.jsonl` with the
-    full league list (latest capture of the day wins; untouched when the
-    list hasn't changed). This is what makes the injury training features
-    accumulate without anyone running `predict` — see ARCHITECTURE §4.10.
+    full league list. Each team's lines stop updating once its game tips
+    (no in-game injuries leak into same-day training features); the file is
+    untouched when nothing changed. This is what makes the injury training
+    features accumulate without anyone running `predict` — ARCHITECTURE §4.10.
     """
     if jsonl is not None:
         from nba_betting.data.injury_jsonl import (
@@ -1478,6 +1488,7 @@ def snapshot_injuries(
             f"players={result.get('players', 0)} "
             f"written={result.get('written', 0)} "
             f"unchanged={result.get('unchanged', False)} "
+            f"frozen={len(result.get('frozen_teams', []))} "
             f"path={result.get('path', '')}"
         )
         for w in result.get("warnings", []):
@@ -1683,6 +1694,105 @@ def import_snapshots(
             console.print(f"[yellow]  warn: {e}[/yellow]")
 
 
+@app.command(name="snapshot-loop")
+def snapshot_loop(
+    odds_dir: str = typer.Option("data/odds_snapshots", "--odds-dir"),
+    injuries_dir: str = typer.Option("data/injury_snapshots", "--injuries-dir"),
+    budget_minutes: int = typer.Option(
+        330, "--budget-minutes",
+        help="Stop (and ask for a successor run) before this many minutes.",
+    ),
+    skip_nba_api: bool = typer.Option(
+        False, "--skip-nba-api",
+        help="ESPN-only slate (GitHub runners; stats.nba.com never answers there).",
+    ),
+    commit_cmd: str = typer.Option(
+        None, "--commit-cmd",
+        help="Shell command that commits + pushes new snapshot files.",
+    ),
+) -> None:
+    """Capture odds + injury snapshots in a self-paced loop (GH Actions).
+
+    Paces itself on the next tip-off (30 / 15 / 5 min), stops when nothing
+    tips within 12 h ("idle") or when the budget runs out ("budget"). On
+    GitHub Actions it writes `continue=true` to $GITHUB_OUTPUT on a budget
+    stop so the workflow dispatches the next run of the chain.
+    """
+    import os
+    from datetime import timedelta
+    from nba_betting.data.injury_jsonl import capture_injuries_to_jsonl
+    from nba_betting.data.snapshot_jsonl import capture_snapshot_to_jsonl
+    from nba_betting.data.snapshot_loop import HEARTBEAT, run_loop, shell_commit
+
+    def _odds(last_written: dict) -> dict:
+        r = capture_snapshot_to_jsonl(
+            odds_dir, skip_nba_api=skip_nba_api,
+            last_written=last_written, heartbeat=HEARTBEAT,
+        )
+        tip = r.get("next_tip_utc")
+        console.print(
+            f"odds games={r['games']} written={r['written']} deduped={r['deduped']} "
+            f"poly={r['polymarket_lines']} espn={r['espn_lines']} "
+            f"next_tip={tip.strftime('%Y-%m-%d %H:%MZ') if tip else '-'}"
+        )
+        for w in r.get("warnings", []):
+            console.print(f"[yellow]  warn: {w}[/yellow]")
+        return r
+
+    def _injuries() -> dict:
+        r = capture_injuries_to_jsonl(injuries_dir)
+        console.print(
+            f"injuries date={r['snapshot_date']} players={r['players']} "
+            f"written={r['written']} unchanged={r['unchanged']} "
+            f"frozen={len(r['frozen_teams'])}"
+        )
+        for w in r.get("warnings", []):
+            console.print(f"[yellow]  warn: {w}[/yellow]")
+        return r
+
+    result = run_loop(
+        capture_odds=_odds,
+        capture_injuries=_injuries,
+        commit=shell_commit(commit_cmd) if commit_cmd else (lambda: True),
+        budget=timedelta(minutes=budget_minutes),
+    )
+    console.print(
+        f"[green]snapshot-loop done[/] reason={result.reason} captures={result.captures} "
+        f"injury_captures={result.injury_captures} errors={len(result.errors)}"
+    )
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a", encoding="utf-8") as f:
+            f.write(f"continue={'true' if result.should_continue else 'false'}\n")
+
+
+@app.command(name="repair-snapshots")
+def repair_snapshots_cmd(
+    path: str = typer.Option("data/odds_snapshots", "--path"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report only; change nothing."),
+) -> None:
+    """One-off cleanup of odds_snapshots rows written by pre-2026-10 code.
+
+    Removes duplicate rows, re-files snapshots that were attached to the
+    next game of a series (re-matched from the JSONL files), and NULLs
+    ESPN probabilities that were the spread proxy rather than a moneyline.
+    Idempotent. Back up data/nba_betting.db first.
+    """
+    from nba_betting.data.snapshot_jsonl import repair_snapshots
+    from nba_betting.db.session import init_db
+
+    init_db()
+    res = repair_snapshots(path, dry_run=dry_run)
+    label = "repair-snapshots (dry run)" if dry_run else "repair-snapshots"
+    console.print(
+        f"[green]{label}[/] duplicates_removed={res['duplicates_removed']} "
+        f"rematched={res['rematched']} espn_probs_nulled={res['espn_probs_nulled']} "
+        f"errors={len(res['errors'])}"
+    )
+    for e in res["errors"][:10]:
+        console.print(f"[yellow]  warn: {e}[/yellow]")
+
+
 @app.command(name="sync-players")
 def sync_players() -> None:
     """Sync player rosters and depth charts from ESPN."""
@@ -1833,6 +1943,8 @@ def commands() -> None:
         ("python3 -m nba_betting injury add 'Name' --team LAL --impact 8", "Add injury manually"),
         ("python3 -m nba_betting sync-players", "Sync player rosters from ESPN"),
         ("python3 -m nba_betting snapshot-odds", "Capture Polymarket+ESPN snapshot (cron)"),
+        ("python3 -m nba_betting import-snapshots --pull", "Pull + load the GH Actions snapshots"),
+        ("python3 -m nba_betting repair-snapshots", "One-off cleanup of pre-2026-10 snapshot rows"),
         ("python3 -m nba_betting readiness-status", "Report injury + odds snapshot coverage"),
         ("python3 -m nba_betting serve", "Launch web dashboard at localhost:8050"),
         ("python3 -m nba_betting commands", "Show this help"),

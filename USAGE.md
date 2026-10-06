@@ -194,58 +194,49 @@ Snapshots are **automatically deduplicated**: if prices haven't moved by more th
 
 #### Running Snapshots Remotely (GitHub Actions)
 
-Based in Europe? NBA games tip off between 00:00 and 03:30 UTC — your local machine is asleep. The repo ships a GitHub Actions workflow that runs on GitHub's infrastructure instead. It writes JSONL snapshot records and commits them back to the repo; you `git pull` the next morning and import them locally.
+Based in Europe? NBA games tip off between 16:00 and 03:30 UTC, mostly while you're asleep. The repo ships a GitHub Actions workflow that runs on GitHub's infrastructure instead. It writes JSONL snapshot records and commits them back to `main`; you pull and import them locally the next morning.
 
 **One-time setup:**
 
 1. Push the repo to GitHub (if not already).
-2. Go to **Repo → Settings → Actions → General → Workflow permissions** and select **"Read and write permissions"**. (The workflow already declares `permissions: contents: write`, but the repo setting is still required.)
+2. Go to **Repo → Settings → Actions → General → Workflow permissions** and select **"Read and write permissions"**. (The workflow declares `contents: write` and `actions: write`, but the repo setting is still required.)
 3. Visit the **Actions** tab and confirm the workflow named **snapshot-odds** appears. The first run may need a manual "Enable workflow" click.
 4. Click **Run workflow** → **Run workflow** once to smoke-test end-to-end. You should see a new commit `chore(snapshots): YYYY-MM-DD HH:MMZ [skip ci]` and a file in `data/odds_snapshots/`.
 
 **Daily usage:**
 
 ```bash
-python3 -m nba_betting import-snapshots --pull   # One-shot: git pull + load JSONL → DB
+python3 -m nba_betting import-snapshots --pull   # One-shot: fetch origin/main + load JSONL → DB
 ```
 
-`--pull` runs `git pull --ff-only` in the repo root before importing, so snapshots committed overnight by the GitHub Actions runner land in your local working copy and then in your local `odds_snapshots` table in a single command. If `--pull` fails (no upstream, merge conflict), it prints a warning and still imports whatever files already exist locally — safe to run daily.
+`--pull` fetches `origin/main` and fast-forwards your checkout to it before importing, so snapshots committed overnight by the GitHub Actions runner land in your local working copy and then in your local `odds_snapshots` table in a single command. If it can't fast-forward (e.g. you're on a branch with local commits), it prints a warning and still imports whatever files already exist locally — safe to run daily.
 
-Without `--pull` you'll need to `git pull` manually first:
-
-```bash
-git pull                                     # Pull the overnight snapshot commits
-python3 -m nba_betting import-snapshots      # Load JSONL → local odds_snapshots table
-```
-
-`import-snapshots` is **idempotent**: safe to rerun on any cadence, duplicates are detected on `(game_date, home_team_id, away_team_id, source, timestamp)` and skipped. You can also point it at a single file:
+`import-snapshots` is **idempotent**: a record's key is `(home_team_id, away_team_id, source, timestamp)` — one capture of one matchup — so rerunning it on any cadence imports nothing twice. Each record is matched to its game from the record's own ET `game_date`; records whose game isn't in the DB yet (future or preseason games) are stored unlinked and linked by the next `sync`. You can also point it at a single file:
 
 ```bash
 python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.jsonl
 ```
 
-**Note on the `espn-fallback` source:** when the GH Actions runner prints `source=espn-fallback` with a `note: nba-api returned 0 games; using ESPN fallback`, that's the expected path — `stats.nba.com` silently blocks datacenter IPs, so the runner falls through to ESPN's scoreboard endpoint. The CLI reports this as `ok` with a cyan `note` line, not a yellow warn; the snapshot is still captured and committed normally.
+**How the workflow runs (a self-paced loop, not a cron grid).** Until 2026-10 the workflow used ~33 cron slots per day. GitHub's scheduler delivered about 6 of them, often hours late (no runs at all 09:00–15:00 UTC; runs at 04:00–09:00 UTC when nothing was scheduled), so the last capture before a 7 PM ET tip was a median **97 minutes** old. Now each run is one long job (`snapshot-loop`) that paces itself on the next tip-off:
 
-**Cron schedule:** concentrated in the *pre-tipoff* window (where line movement actually has predictive signal), not during live games:
+| Next tip-off | Odds capture every | Injury list every |
+|---|---|---|
+| more than 12 h away | — (run stops: "idle") | — |
+| 3–12 h | 30 min | 1 h |
+| 1–3 h | 15 min | 15 min within 2 h, else 1 h |
+| under 1 h | 5 min | 15 min |
 
-| Window (UTC) | ET equivalent | Cadence | Purpose |
-|---|---|---|---|
-| ~13:07–17:07 | 9 AM – 1 PM | hourly | Late-morning injury news + early weekend tipoffs |
-| ~18:07–21:37 | 2 PM – 5:30 PM | every 30 min | Afternoon build-up, main Woj/Shams drop window |
-| ~22:07–01:52 | 6 PM – 9:45 PM | every 15 min | Dense closing-line capture through ET tipoffs |
-| ~02:07–02:52 | 10 PM – 10:45 PM | every 15 min | West Coast closing line |
+A run lasts up to 5.5 h (GitHub's job limit is 6 h), pushing its new files every 30 min. If games are still ahead when its time is up, it dispatches the next run itself (`workflow_dispatch` starts within seconds), so the chain covers a game day from morning to the last West Coast tip. After the last tip, the run stops without a successor. An hourly cron (`:17`) restarts the chain the next day; cron firings that land while a run is active wait as "pending" and get cancelled when the successor is queued, so a few cancelled runs per day in the Actions tab are normal. Unchanged lines are written at most every 30 min (heartbeat), which keeps the files small without losing any line value. The slate comes from ESPN only (`--skip-nba-api`): stats.nba.com never answers GitHub's IPs, and waiting out its timeouts used to cost ~4.6 min per capture.
 
-~33 runs/day, ~1000 Actions-minutes/month (comfortably under the 2000-min free tier). No runs 03:00–13:00 UTC: all games are live/final and the code filters those out anyway.
+Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py); workflow: [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml); commit/push: [.github/scripts/commit-snapshots.sh](.github/scripts/commit-snapshots.sh) (odds files merge as a union via `.gitattributes`, so concurrent appends never conflict).
 
-> **Note on the 7-min offset:** every slot sits at `:07/:22/:37/:52` instead of `:00/:15/:30/:45`. GitHub's scheduler is congested on the hour and quarter-hour boundaries (their own [docs recommend offsetting](https://docs.github.com/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule)), so aligning to those marks causes many firings to be delayed past their successor and coalesced — we observed ~15% hit rate on the initial on-boundary schedule. Offsetting fixes that.
+**ESPN odds** carry the real DraftKings moneyline (de-vigged) plus spread and total; the raw American odds are stored in the JSONL too. If ESPN lists only a spread, the record keeps the spread/total and leaves `home_prob` empty. Before 2026-10 ESPN had moved its moneyline field and none were parsed, so every stored ESPN `home_prob` was a 2.5%/point spread proxy. `repair-snapshots` and the importer blank those out.
 
-See [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml) to tweak.
+> **GitHub's 60-day inactivity rule:** scheduled workflows are disabled after 60 days without repo activity. The injury list changes almost daily, so the workflow keeps committing through the offseason and should stay enabled. If it is ever disabled, re-enable it in the Actions tab and trigger a manual run.
 
-> **⚠️ GitHub's 60-day inactivity rule:** scheduled workflows are automatically disabled if the repo has no new commits for 60 days. The NBA offseason (June–October) exceeds this. **First action each October**: visit the Actions tab and re-enable the `snapshot-odds` workflow, then trigger a manual run to verify. The workflow itself commits daily during the season, so mid-season deactivation shouldn't happen.
+#### Daily Injury Snapshots (same workflow)
 
-#### Daily Injury Snapshots (same cron)
-
-The same workflow also runs `snapshot-injuries --jsonl data/injury_snapshots` on every firing. It writes the **full ESPN injury list** for the NBA (ET) day to `data/injury_snapshots/<date>.jsonl` — the latest capture of the day wins, and the file is left untouched (no commit) when nothing changed. This is what grows the `historical_injuries` table, which is the training-side source of the `injury_impact_*` features; before this, those rows were only written when you personally ran `predict`.
+The same loop also captures the **full ESPN injury list** for the NBA (ET) day to `data/injury_snapshots/<date>.jsonl`. **Each team's lines freeze at its tip-off**: they keep updating until the team's game starts, then stay as they were at the last pre-tip capture (tip times come from ESPN's scoreboard). Training joins this file to the same day's games, so a list refreshed after tip-off used to leak injuries suffered *in* that game into the "pre-game" features. If the scoreboard can't be read, an existing day file is left untouched. The file isn't rewritten (no commit) when nothing changed. This is what grows the `historical_injuries` table, the training-side source of the `injury_impact_*` features.
 
 `import-snapshots` (with or without `--pull`) loads the injury files too, replacing each day's rows in `historical_injuries` (idempotent). To capture locally instead of via GitHub:
 
@@ -253,6 +244,16 @@ The same workflow also runs `snapshot-injuries --jsonl data/injury_snapshots` on
 python3 -m nba_betting snapshot-injuries            # refresh injuries.json + today's historical_injuries rows
 python3 -m nba_betting snapshot-injuries --jsonl data/injury_snapshots   # DB-free file mode
 ```
+
+#### One-off: repair snapshot rows written before 2026-10
+
+```bash
+cp data/nba_betting.db data/nba_betting.backup.db
+python3 -m nba_betting repair-snapshots --dry-run   # report only
+python3 -m nba_betting repair-snapshots
+```
+
+Removes duplicate rows (from the old import key), re-files closing lines that the old resolver attached to the *next* game of a playoff series (re-matched from the JSONL files), re-dates old local `predict` captures from their game id, and blanks the fake ESPN probabilities. Idempotent; a DB built from scratch with current code doesn't need it.
 
 ### Step 3: Place Bets
 
@@ -421,13 +422,16 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-89 fast unit tests across five test files:
+183 fast unit tests (~4 s); the main files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
 - **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
 - **`test_montecarlo.py`** (12): empirical bootstrap correctness, market-null behaviour, horizon-invariant log-growth metrics, reproducibility, input validation.
 - **`test_simulate_horizon.py`** (8): data-driven horizon projection, density scaling, edge-case fallbacks.
-- **`test_snapshot_jsonl.py`** (14): JSONL round-trip, idempotence, bad-row tolerance, ESPN fallback, Polymarket date disambiguation.
+- **`test_snapshot_jsonl.py`** (25): JSONL round-trip, idempotence on the capture key, game matching (late-tip captures stay on tonight's game; no guessing for preseason), legacy ESPN spread-proxy blanking, `repair-snapshots`, ESPN-only slate, timestamp after fetch, per-date ESPN odds, heartbeat dedupe.
+- **`test_snapshot_loop.py`** (16): tip-paced cadence, idle vs budget stop (successor dispatch), fetch-failure retries, error tolerance, push throttling.
+- **`test_espn_odds.py`** (15): moneyline parsing from ESPN's current and legacy shapes, de-vig, spread-proxy flagging, single-source `prob_movement`, no bets priced off the spread proxy.
+- **`test_injury_jsonl.py`** (10): ET-dated injury files, per-team tip-off freeze, scoreboard tip detection, idempotent import.
 - **`test_playoff_sync_and_resolve.py`** (10): play-in/playoff game union, `update_results` date matching, `record_predictions` ET-date filing.
 
 Run this after any model or pipeline change to catch silent regressions before they corrupt live predictions.
@@ -501,7 +505,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (89 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (183 tests) |
 
 ---
 
@@ -555,7 +559,9 @@ python3 -m nba_betting sync-players              # Sync player rosters from ESPN
 python3 -m nba_betting predict                   # Today's recommendations + explanations
 python3 -m nba_betting predict --bankroll 5000   # Custom bankroll
 python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on a cron)
-python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, for GitHub Actions
+python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, one capture
+python3 -m nba_betting snapshot-loop --skip-nba-api --commit-cmd CMD  # Self-paced capture loop (what GitHub Actions runs)
+python3 -m nba_betting repair-snapshots --dry-run # One-off cleanup of pre-2026-10 snapshot rows (drop --dry-run to apply)
 python3 -m nba_betting import-snapshots --pull   # Git-pull + load odds + injury JSONL snapshots from GH Actions (daily)
 python3 -m nba_betting import-snapshots          # Same, but without the git pull step
 python3 -m nba_betting snapshot-injuries         # Today's ESPN injury list -> historical_injuries (or --jsonl DIR for file mode)
@@ -580,7 +586,7 @@ python3 -m nba_betting simulate --n-sims 50000
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/ -v                                 # 45 unit tests (run after any code change)
+pytest tests/ -v                                 # 183 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN
