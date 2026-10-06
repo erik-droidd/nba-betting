@@ -16,6 +16,13 @@ def _inj(name, team, status="Out", impact=7.0, pid="1"):
                         reason="knee", impact_rating=impact, player_id=pid)
 
 
+@pytest.fixture(autouse=True)
+def _offline_scoreboard(monkeypatch):
+    """Capture reads tip-off times from ESPN's scoreboard; keep these tests
+    offline with an empty slate (no team has tipped)."""
+    monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard", lambda *a, **kw: [])
+
+
 def _reload_with_tmp_db(tmp_path, monkeypatch):
     from nba_betting import config as _cfg
     monkeypatch.setattr(_cfg, "DB_PATH", str(tmp_path / "t.sqlite"))
@@ -163,3 +170,79 @@ def test_build_injury_list_from_espn_estimates_impact_and_keeps_overrides(monkey
 
     monkeypatch.setattr(espn, "fetch_injuries", lambda: [])
     assert inj_mod.build_injury_list_from_espn() == []
+
+
+# ------------------------------------------------- tip-off freeze (2026-10)
+
+def _lines(path):
+    return {(r["team_abbr"], r["player_name"]): r for r in
+            (json.loads(l) for l in path.read_text().splitlines())}
+
+
+def test_tipped_team_keeps_its_pre_tip_lines_others_update(tmp_path):
+    """2026-10-05: an injury suffered in that night's game was added to
+    the same day's file at a post-tip capture — leakage for training,
+    which joins the file to that day's games."""
+    from nba_betting.data.injury_jsonl import capture_injuries_to_jsonl
+    pre = datetime(2026, 10, 5, 21, 0, tzinfo=timezone.utc)
+    capture_injuries_to_jsonl(tmp_path, timestamp=pre, started_teams=set(),
+                              injuries=[_inj("Amy Adams", "MEM", "Questionable"),
+                                        _inj("Bo Brown", "BOS", "Out")])
+    post = datetime(2026, 10, 6, 2, 14, tzinfo=timezone.utc)   # 10:14 PM ET Oct 5
+    res = capture_injuries_to_jsonl(
+        tmp_path, timestamp=post, started_teams={"MEM", "ATL"},
+        injuries=[_inj("Amy Adams", "MEM", "Out"),              # status changed in-game
+                  _inj("Cy Cole", "MEM", "Day-To-Day"),          # hurt in-game
+                  _inj("Bo Brown", "BOS", "Available")])         # not tipped: updates
+
+    got = _lines(tmp_path / "2026-10-05.jsonl")
+    assert set(got) == {("MEM", "Amy Adams"), ("BOS", "Bo Brown")}
+    assert got[("MEM", "Amy Adams")]["status"] == "Questionable"
+    assert got[("MEM", "Amy Adams")]["captured_at"] == "2026-10-05T21:00:00Z"
+    assert got[("BOS", "Bo Brown")]["status"] == "Available"
+    assert res["frozen_teams"] == ["ATL", "MEM"] and not res["warnings"]
+
+
+def test_first_capture_after_tip_uses_last_nights_list_for_tipped_teams(tmp_path):
+    from nba_betting.data.injury_jsonl import capture_injuries_to_jsonl
+    capture_injuries_to_jsonl(tmp_path, started_teams=set(),
+                              timestamp=datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc),  # Oct 4 ET
+                              injuries=[_inj("Amy Adams", "MEM", "Questionable")])
+    capture_injuries_to_jsonl(tmp_path, started_teams={"MEM"},
+                              timestamp=datetime(2026, 10, 6, 0, 30, tzinfo=timezone.utc),  # Oct 5 ET
+                              injuries=[_inj("Amy Adams", "MEM", "Out"), _inj("Cy Cole", "MEM")])
+    got = _lines(tmp_path / "2026-10-05.jsonl")
+    assert list(got) == [("MEM", "Amy Adams")]
+    assert got[("MEM", "Amy Adams")]["snapshot_date"] == "2026-10-05"
+    assert got[("MEM", "Amy Adams")]["status"] == "Questionable"
+
+
+def test_unknown_tip_times_never_overwrite_an_existing_day(tmp_path):
+    from nba_betting.data.injury_jsonl import capture_injuries_to_jsonl
+    ts = datetime(2026, 10, 5, 21, 0, tzinfo=timezone.utc)
+    capture_injuries_to_jsonl(tmp_path, timestamp=ts, started_teams=set(),
+                              injuries=[_inj("Amy Adams", "MEM")])
+    before = (tmp_path / "2026-10-05.jsonl").read_text()
+    res = capture_injuries_to_jsonl(tmp_path, timestamp=ts, started_teams=None,
+                                    injuries=[_inj("Cy Cole", "MEM")])
+    assert (tmp_path / "2026-10-05.jsonl").read_text() == before
+    assert res["written"] == 0 and res["warnings"]
+
+
+def test_started_teams_from_scoreboard(monkeypatch):
+    from nba_betting.data.injury_jsonl import _started_teams
+    ev = lambda h, a, status, date: {"home_team": {"abbr": h}, "away_team": {"abbr": a},
+                                     "status": status, "date": date}
+    monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard", lambda d=None: [
+        ev("ATL", "MEM", "STATUS_IN_PROGRESS", "2026-10-05T23:30Z"),
+        ev("SAC", "LAL", "STATUS_SCHEDULED", "2026-10-06T02:00Z"),   # later tonight
+        ev("PHI", "NYK", "STATUS_SCHEDULED", "2026-10-06T00:00Z"),   # past tip, not flipped yet
+        ev("DET", "PHX", "STATUS_POSTPONED", "2026-10-05T23:00Z"),
+    ])
+    now = datetime(2026, 10, 6, 0, 5, tzinfo=timezone.utc)
+    assert _started_teams(now) == {"ATL", "MEM", "PHI", "NYK"}
+
+    def _down(d=None):
+        raise ConnectionError
+    monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard", _down)
+    assert _started_teams(now) is None

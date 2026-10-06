@@ -158,8 +158,8 @@ def fetch_scoreboard(date_str: str | None = None) -> list[dict]:
                 "provider": o.get("provider", {}).get("name", ""),
                 "spread": _safe_float(o.get("spread")),
                 "over_under": _safe_float(o.get("overUnder")),
-                "home_moneyline": _safe_float(o.get("homeTeamOdds", {}).get("moneyLine")),
-                "away_moneyline": _safe_float(o.get("awayTeamOdds", {}).get("moneyLine")),
+                "home_moneyline": _moneyline(o, "home"),
+                "away_moneyline": _moneyline(o, "away"),
             }
 
         games.append({
@@ -340,3 +340,33 @@ def _safe_float(val) -> float | None:
         return float(val)
     except (ValueError, TypeError):
         return None
+
+
+def _parse_american(val) -> float | None:
+    """American odds (``-205``, ``"+170"``, ``"EVEN"``) -> float, else None.
+
+    Anything with ``|odds| < 100`` (``"OFF"``, ``0``, junk) is not a price.
+    """
+    if isinstance(val, str) and val.strip().upper() in ("EVEN", "EV"):
+        return 100.0
+    v = _safe_float(val.strip() if isinstance(val, str) else val)
+    if v is None or abs(v) < 100:
+        return None
+    return v
+
+
+def _moneyline(odds: dict, side: str) -> float | None:
+    """Current moneyline for ``side`` ("home"/"away") from an ESPN odds entry.
+
+    ESPN moved moneylines from ``homeTeamOdds.moneyLine`` to
+    ``moneyline.<side>.close.odds`` (an American-odds string; "close" is the
+    current price, "open" the opener). Reading only the old field returned
+    None for every game since at least 2026-04, so every ESPN probability
+    silently fell back to the spread heuristic. Try the old field first so
+    either shape works.
+    """
+    legacy = _parse_american((odds.get(f"{side}TeamOdds") or {}).get("moneyLine"))
+    if legacy is not None:
+        return legacy
+    current = ((odds.get("moneyline") or {}).get(side) or {}).get("close") or {}
+    return _parse_american(current.get("odds"))

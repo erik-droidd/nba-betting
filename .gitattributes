@@ -1,0 +1,3 @@
+# Odds snapshot files are append-only JSONL: two runs appending to the same
+# day file merge by keeping both sides' lines.
+data/odds_snapshots/*.jsonl merge=union
