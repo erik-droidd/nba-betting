@@ -101,3 +101,6 @@
 {"game_date":"2026-10-06","home_team_abbr":"UTA","away_team_abbr":"DEN","source":"espn","timestamp":"2026-10-06T21:44:12","home_prob":0.4826358742837298,"spread":1.5,"over_under":229.5,"home_moneyline":-102.0,"away_moneyline":-118.0,"game_id":null}
 {"game_date":"2026-10-06","home_team_abbr":"GSW","away_team_abbr":"LAL","source":"polymarket","timestamp":"2026-10-06T21:44:12","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-06","home_team_abbr":"GSW","away_team_abbr":"LAL","source":"espn","timestamp":"2026-10-06T21:44:12","home_prob":0.6164383561643836,"spread":-4.5,"over_under":220.5,"home_moneyline":-180.0,"away_moneyline":150.0,"game_id":null}
+{"game_date":"2026-10-06","home_team_abbr":"CHA","away_team_abbr":"BKN","source":"polymarket","timestamp":"2026-10-06T21:59:37","home_prob":0.535,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-06","home_team_abbr":"CHA","away_team_abbr":"BKN","source":"espn","timestamp":"2026-10-06T21:59:37","home_prob":0.551441114716549,"spread":-2.5,"over_under":212.5,"home_moneyline":-135.0,"away_moneyline":114.0,"game_id":null}
+{"game_date":"2026-10-06","home_team_abbr":"UTA","away_team_abbr":"DEN","source":"polymarket","timestamp":"2026-10-06T21:59:37","home_prob":0.495,"spread":null,"over_under":null,"game_id":null}
