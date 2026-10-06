@@ -28,3 +28,7 @@
 {"game_date":"2026-10-05","home_team_abbr":"MIL","away_team_abbr":"MIN","source":"espn","timestamp":"2026-10-05T21:04:00","home_prob":0.3875,"spread":4.5,"over_under":229.5,"game_id":null}
 {"game_date":"2026-10-05","home_team_abbr":"SAC","away_team_abbr":"LAL","source":"polymarket","timestamp":"2026-10-05T21:04:00","home_prob":0.35,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-05","home_team_abbr":"SAC","away_team_abbr":"LAL","source":"espn","timestamp":"2026-10-05T21:04:00","home_prob":0.3625,"spread":5.5,"over_under":229.5,"game_id":null}
+{"game_date":"2026-10-05","home_team_abbr":"MIL","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-10-05T23:56:47","home_prob":0.325,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-05","home_team_abbr":"MIL","away_team_abbr":"MIN","source":"espn","timestamp":"2026-10-05T23:56:47","home_prob":0.3375,"spread":6.5,"over_under":231.5,"game_id":null}
+{"game_date":"2026-10-05","home_team_abbr":"SAC","away_team_abbr":"LAL","source":"polymarket","timestamp":"2026-10-05T23:56:47","home_prob":0.345,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-05","home_team_abbr":"SAC","away_team_abbr":"LAL","source":"espn","timestamp":"2026-10-05T23:56:47","home_prob":0.3375,"spread":6.5,"over_under":228.5,"game_id":null}
