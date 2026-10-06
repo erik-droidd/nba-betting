@@ -27,6 +27,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
@@ -346,9 +347,11 @@ def capture_snapshot_to_jsonl(
         # Prefer nba_api locally (authoritative team/game IDs); fall through
         # to ESPN only when it returns nothing.
         source = "nba-api"
-        games = fetch_todays_games()
+        # Exhibitions included: capturing their odds is harmless (they
+        # never join a stored game) and keeps the pipeline exercised.
+        games = fetch_todays_games(include_exhibition=True)
         if not games:
-            games = fetch_upcoming_games(days_ahead=2)
+            games = fetch_upcoming_games(days_ahead=2, include_exhibition=True)
     if not games:
         espn_games = _fetch_games_via_espn(days_ahead=2, errors=fetch_errors)
         if espn_games:
@@ -657,6 +660,41 @@ def import_snapshots_jsonl(
         session.close()
 
 
+# When the Polymarket multi-event collision fix reached main (PR #11).
+POLYMARKET_COLLISION_FIX_UTC = datetime(2026, 4, 22, 21, 13, 25)
+_COLLISION_TOLERANCE = 0.12
+_MARGIN_SD = 13.0   # NBA final-margin SD around the spread, points
+
+
+def _spread_home_prob(spread: float) -> float:
+    """Home win probability implied by the home spread, assuming the final
+    margin is normal around -spread with SD ``_MARGIN_SD``. A sanity
+    reference only (not stored anywhere)."""
+    return 0.5 * (1.0 + math.erf((-spread / _MARGIN_SD) / math.sqrt(2.0)))
+
+
+def _collision_rows(by_key: dict[tuple, OddsSnapshot]) -> list[tuple]:
+    """Natural keys of pre-fix Polymarket rows belonging to games where at
+    least one pre-fix price is off by more than ``_COLLISION_TOLERANCE``
+    from ESPN's spread captured at the same moment (see repair step 5)."""
+    espn_spread = {
+        (r.home_team_id, r.away_team_id, r.timestamp): r.spread
+        for r in by_key.values() if r.source == "espn" and r.spread is not None
+    }
+    pre_fix: dict[tuple, list[tuple]] = {}
+    flagged: set[tuple] = set()
+    for k, r in by_key.items():
+        if (r.source != "polymarket" or r.home_prob is None or r.timestamp is None
+                or r.timestamp >= POLYMARKET_COLLISION_FIX_UTC):
+            continue
+        game = (r.game_date, r.home_team_id, r.away_team_id)
+        pre_fix.setdefault(game, []).append(k)
+        spread = espn_spread.get((r.home_team_id, r.away_team_id, r.timestamp))
+        if spread is not None and abs(r.home_prob - _spread_home_prob(spread)) > _COLLISION_TOLERANCE:
+            flagged.add(game)
+    return [k for game in flagged for k in pre_fix[game]]
+
+
 def repair_snapshots(
     path: Path | str = DEFAULT_SNAPSHOT_DIR,
     *,
@@ -678,9 +716,22 @@ def repair_snapshots(
     3. **Fake ESPN probabilities** — ESPN ``home_prob`` values that are
        exactly the spread proxy are set to NULL (all ESPN probs captured
        before the moneyline fix; spreads/totals are kept).
+    4. **Post-game prices** — rows captured on a later ET day than their
+       game, or priced at a resolved 0/1 (>= 0.99 / <= 0.01), are deleted.
+       Early local captures stored the settled market (1.0) as the
+       "closing line" of two 2026-04-09 games.
+    5. **Wrong Polymarket event** — before the multi-event collision fix
+       (``POLYMARKET_COLLISION_FIX_UTC``) a pair with several open events
+       (playoff Games 1 and 2 at the same arena) could be priced from the
+       wrong one. For each game, if any pre-fix Polymarket price disagrees
+       by more than ``_COLLISION_TOLERANCE`` with ESPN's spread captured at
+       the same moment, all of that game's pre-fix Polymarket rows are
+       deleted. After the fix no capture exceeds that gap (0 of 519); before
+       it 13 of 100 did, in 4 games.
 
-    Returns ``{duplicates_removed, rematched, espn_probs_nulled, errors,
-    dry_run}``. With ``dry_run`` nothing is written.
+    Returns ``{duplicates_removed, rematched, espn_probs_nulled,
+    postgame_removed, collision_removed, errors, dry_run}``. With
+    ``dry_run`` nothing is written.
     """
     session = get_session()
     try:
@@ -726,6 +777,21 @@ def repair_snapshots(
                 r.home_prob = None
                 nulled += 1
 
+        postgame = []
+        for k, r in list(by_key.items()):
+            if (
+                (r.timestamp is not None and r.game_date is not None
+                 and _et_date(r.timestamp) > r.game_date)
+                or (r.home_prob is not None and (r.home_prob >= 0.99 or r.home_prob <= 0.01))
+            ):
+                postgame.append(k)
+        for k in postgame:
+            session.delete(by_key.pop(k))
+
+        collision = _collision_rows(by_key)
+        for k in collision:
+            session.delete(by_key.pop(k))
+
         if dry_run:
             session.rollback()
         else:
@@ -734,6 +800,8 @@ def repair_snapshots(
             "duplicates_removed": dupes,
             "rematched": rematched,
             "espn_probs_nulled": nulled,
+            "postgame_removed": len(postgame),
+            "collision_removed": len(collision),
             "errors": errors,
             "dry_run": dry_run,
         }

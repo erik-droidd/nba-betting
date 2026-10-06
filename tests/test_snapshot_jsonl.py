@@ -1061,3 +1061,51 @@ def test_capture_reports_next_tip_and_fetch_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("nba_betting.data.espn.fetch_scoreboard", _down)
     res = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
     assert res["games"] == 0 and res["games_fetch_failed"] is True
+
+
+def test_repair_drops_postgame_prices_and_wrong_polymarket_events(tmp_path, monkeypatch):
+    """Step 4: a settled 1.0 price captured the morning after the game is
+    not a closing line. Step 5: before the 2026-04-22 collision fix, a game
+    whose Polymarket price disagrees with ESPN's same-moment spread by more
+    than 12 pts was priced from the wrong event — drop its pre-fix
+    Polymarket rows, keep everything else."""
+    from datetime import date as _date, datetime as _dt
+    session_module, jsonl = _reload_with_tmp_db(tmp_path, monkeypatch)
+    _seed_teams(session_module)
+    _add_games(session_module, [("G1", _date(2026, 4, 20)), ("G2", _date(2026, 4, 9))])
+    from nba_betting.db.models import OddsSnapshot
+
+    def snap(gid, gd, src, ts, prob=None, spread=None):
+        return OddsSnapshot(game_id=gid, game_date=gd, home_team_id=1610612738,
+                            away_team_id=1610612747, source=src, timestamp=ts,
+                            home_prob=prob, spread=spread)
+    t1, t2, t3 = _dt(2026, 4, 20, 16, 0), _dt(2026, 4, 20, 18, 0), _dt(2026, 4, 23, 12, 0)
+    sess = session_module.get_session()
+    try:
+        sess.add_all([
+            # G1 (pre-fix): -7.5 spread ≈ 0.72; Polymarket says 0.56 → wrong event
+            snap("G1", _date(2026, 4, 20), "polymarket", t1, 0.56),
+            snap("G1", _date(2026, 4, 20), "espn", t1, spread=-7.5),
+            snap("G1", _date(2026, 4, 20), "polymarket", t2, 0.58),   # same game, no comparator
+            snap("G1", _date(2026, 4, 20), "espn", t2, spread=-7.5),  # spreads are kept
+            # G2: a sane pre-game price, then the settled market the next morning
+            snap("G2", _date(2026, 4, 9), "polymarket", _dt(2026, 4, 9, 22, 0), 0.615),
+            snap("G2", _date(2026, 4, 9), "polymarket", _dt(2026, 4, 10, 8, 37), 1.0),
+            # post-fix captures are never touched by the collision rule
+            snap(None, _date(2026, 4, 24), "polymarket", t3, 0.40),
+            snap(None, _date(2026, 4, 24), "espn", t3, spread=-7.5),
+        ])
+        sess.commit()
+    finally:
+        sess.close()
+
+    res = jsonl.repair_snapshots(tmp_path / "none")
+    assert (res["postgame_removed"], res["collision_removed"]) == (1, 2)
+    left = sorted((r[0].isoformat(), r[2], r[3]) for r in _rows(session_module))
+    assert left == [
+        ("2026-04-09", "polymarket", 0.615),
+        ("2026-04-20", "espn", None), ("2026-04-20", "espn", None),
+        ("2026-04-24", "espn", None), ("2026-04-24", "polymarket", 0.4),
+    ]
+    again = jsonl.repair_snapshots(tmp_path / "none")
+    assert (again["postgame_removed"], again["collision_removed"]) == (0, 0)
