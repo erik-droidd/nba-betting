@@ -1722,7 +1722,7 @@ def snapshot_loop(
     """Capture odds + injury snapshots in a self-paced loop (GH Actions).
 
     Paces itself on the next tip-off (30 / 15 / 5 min), stops when nothing
-    tips within 12 h ("idle") or when the budget runs out ("budget"). On
+    tips within 18 h ("idle") or when the budget runs out ("budget"). On
     GitHub Actions it writes `continue=true` to $GITHUB_OUTPUT on a budget
     stop so the workflow dispatches the next run of the chain.
     """

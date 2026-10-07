@@ -18,6 +18,12 @@ Shape (see ``.github/workflows/snapshot-odds.yml``):
   past the budget. Only a budget stop asks the workflow to dispatch a
   successor run, so the chain carries a game day end to end; idle stops
   end it and an hourly cron restarts it.
+* ``idle_after`` is 18 h, not 12: GitHub delivered the hourly cron only
+  ~4 times a day (2026-10-07: 01:32, 08:39, 16:28 UTC), so with 12 h the
+  08:39 run stopped at once and the chain only restarted at 16:28, 5.5 h
+  late. 18 h lets morning deliveries start it for a 23:00 UTC tip, while
+  the chain still stops overnight (after the last tip the next is usually
+  20+ h away) — except before weekend matinees, which it then covers.
 """
 from __future__ import annotations
 
@@ -31,7 +37,7 @@ from typing import Callable
 
 logger = logging.getLogger("nba_betting.snapshot_loop")
 
-IDLE_AFTER = timedelta(hours=12)
+IDLE_AFTER = timedelta(hours=18)
 PUSH_EVERY = timedelta(minutes=30)
 HEARTBEAT = timedelta(minutes=30)
 FETCH_RETRY = timedelta(minutes=10)

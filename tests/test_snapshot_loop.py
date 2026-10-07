@@ -14,7 +14,7 @@ H = lambda n: timedelta(hours=n)
 
 
 @pytest.mark.parametrize("until,expected", [
-    (H(13), None), (H(12) + M(1), None), (H(12), M(30)), (H(4), M(30)),
+    (H(19), None), (H(18) + M(1), None), (H(18), M(30)), (H(13), M(30)), (H(4), M(30)),
     (H(3), M(15)), (H(1) + M(1), M(15)), (H(1), M(5)), (M(3), M(5)), (-M(10), M(5)),
 ])
 def test_odds_interval_tightens_toward_tip(until, expected):
@@ -127,3 +127,25 @@ def test_loop_shares_dedupe_state_across_captures():
     run_loop(capture_odds=odds, capture_injuries=sim.injuries, commit=sim.commit,
              budget=H(3), clock=sim.clock, sleep=sim.sleep)
     assert len(set(seen)) == 1 and len(seen) > 1
+
+
+def test_morning_cron_delivery_starts_the_loop_for_an_evening_slate():
+    """2026-10-07: GitHub delivered the hourly cron at 08:39 UTC; the first
+    tip was 23:00 (14.3 h later). With a 12 h idle window that run stopped
+    at once and the chain only restarted at 16:28. With 18 h it loops."""
+    sim = _Sim([T0.replace(hour=23, minute=0)])
+    sim.now = T0.replace(hour=8, minute=39)
+    res = run_loop(capture_odds=sim.odds, capture_injuries=sim.injuries, commit=sim.commit,
+                   budget=H(5) + M(30), clock=sim.clock, sleep=sim.sleep)
+    assert res.reason == "budget" and res.should_continue
+    assert res.captures >= 10
+
+
+def test_chain_still_stops_overnight_before_an_evening_slate():
+    """After the last West Coast tip (~02:15 UTC) the next first tip is
+    ~20.75 h away: stop, don't keep a runner up all night."""
+    sim = _Sim([T0.replace(hour=23, minute=0)])
+    sim.now = T0.replace(hour=2, minute=15)
+    res = run_loop(capture_odds=sim.odds, capture_injuries=sim.injuries, commit=sim.commit,
+                   budget=H(5) + M(30), clock=sim.clock, sleep=sim.sleep)
+    assert res.reason == "idle" and res.captures == 1
