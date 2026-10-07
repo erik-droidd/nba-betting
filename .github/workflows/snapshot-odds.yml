@@ -16,9 +16,12 @@ name: snapshot-odds
 # nothing tips within 18 h (overnight, off days, offseason) the run stops
 # without a successor and the hourly cron below restarts the chain (18 h,
 # not 12, because GitHub delivers that cron only ~4x/day: a morning
-# delivery must be able to start the loop for an evening slate); cron
-# firings that arrive while a run is active wait as "pending" and are
-# cancelled when the successor is queued. Logic: nba_betting/data/snapshot_loop.py.
+# delivery must be able to start the loop for an evening slate). An
+# external cron-job.org job also dispatches this workflow at 09:05 and
+# 18:05 UTC (USAGE.md "External daily trigger"), so the restart doesn't
+# depend on GitHub's scheduler. Triggers that arrive while a run is active
+# wait as "pending" and are cancelled when the successor is queued.
+# Logic: nba_betting/data/snapshot_loop.py.
 #
 # GitHub disables scheduled workflows after 60 days without repo activity.
 # The injury list changes almost daily, so commits keep the repo active;

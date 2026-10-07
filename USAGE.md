@@ -230,6 +230,36 @@ A run lasts up to 5.5 h (GitHub's job limit is 6 h), pushing its new files every
 
 Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py); workflow: [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml); commit/push: [.github/scripts/commit-snapshots.sh](.github/scripts/commit-snapshots.sh) (odds files merge as a union via `.gitattributes`, so concurrent appends never conflict).
 
+**External daily trigger (cron-job.org).** GitHub's own scheduler can't be relied on to restart the loop in the morning, so a free [cron-job.org](https://cron-job.org) job starts the workflow directly every day. Set up 2026-10-07; to recreate or repair it:
+
+1. **GitHub token.** Create a fine-grained personal access token at <https://github.com/settings/personal-access-tokens/new>:
+   - resource owner `erik-droidd`;
+   - repository access *Only select repositories* → `nba-betting`;
+   - Repository permissions → **Actions: Read and write**, nothing else.
+
+   The current token has no expiration. Its reach is limited to starting, cancelling or deleting this repo's workflow runs. Revoke it on GitHub if your cron-job.org account is ever compromised.
+2. **cron-job.org job** "nba-betting snapshot loop kick", with time zone **UTC**:
+   - **Schedule:** daily at **09:05** (starts the day's loop; the 18 h window covers first tips up to 03:00 UTC) and **18:05** (backup in case a run died during the day).
+   - **Request:** `POST https://api.github.com/repos/erik-droidd/nba-betting/actions/workflows/snapshot-odds.yml/dispatches`
+   - **Headers:**
+     - `Authorization: Bearer github_pat_…` (the full token after `Bearer `)
+     - `Accept: application/vnd.github+json`
+     - `X-GitHub-Api-Version: 2022-11-28`
+     - `Content-Type: application/json`
+   - **Body:** `{"ref":"main","inputs":{"note":"cron-job.org"},"return_run_details":true}`
+   - **Notifications:** turn on "execution fails".
+3. **Test run** → expect **200** and a body with `workflow_run_id`:
+
+   | Response | Meaning |
+   |---|---|
+   | 401 | Token missing from the header or invalid (regenerate and re-paste) |
+   | 403 | Token lacks Actions write |
+   | 404 | URL typo, or the token doesn't cover the repo |
+   | 422 | Bad body |
+   | 204 with no run ID | The request isn't reaching the workflow endpoint (check the URL) |
+
+   If a loop is already running, the triggered run shows as queued and is then cancelled when the loop queues its successor. That's expected: only one run exists at a time.
+
 **ESPN odds** carry the real DraftKings moneyline (de-vigged) plus spread and total; the raw American odds are stored in the JSONL too. If ESPN lists only a spread, the record keeps the spread/total and leaves `home_prob` empty. Before 2026-10 ESPN had moved its moneyline field and none were parsed, so every stored ESPN `home_prob` was a 2.5%/point spread proxy. `repair-snapshots` and the importer blank those out.
 
 > **GitHub's 60-day inactivity rule:** scheduled workflows are disabled after 60 days without repo activity. The injury list changes almost daily, so the workflow keeps committing through the offseason and should stay enabled. If it is ever disabled, re-enable it in the Actions tab and trigger a manual run.

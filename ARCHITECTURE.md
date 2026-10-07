@@ -2111,7 +2111,12 @@ games, Oct 6 ET):
   16:28. With 18 h a morning delivery starts the loop (30-min cadence, so
   it also captures morning lines and injury news), while the chain still
   stops overnight (next first tip usually 20+ h after the last tip) —
-  except before weekend matinees, which it then bridges. For a guaranteed
-  restart, add an external daily `workflow_dispatch` (e.g. cron-job.org
-  with a fine-grained token, Actions: write).
+  except before weekend matinees, which it then bridges.
+- **External daily trigger (set up 2026-10-07).** A cron-job.org job POSTs
+  the workflow's `workflow_dispatch` at 09:05 and 18:05 UTC with a
+  fine-grained token (`nba-betting` only, Actions: write, no expiration),
+  so the morning restart no longer depends on GitHub's cron. Setup and
+  troubleshooting: USAGE.md "External daily trigger". Tested: 200 +
+  `workflow_run_id` (run 37661548923). An early test returned a bare 204
+  but created no run, so with `return_run_details` the response proves a run exists.
 
