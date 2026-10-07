@@ -13,8 +13,10 @@ name: snapshot-odds
 # loop paced on the next tip-off (every 30 / 15 / 5 min) for up to 5.5 h,
 # then dispatches its own successor — workflow_dispatch starts within
 # seconds, unlike cron — so the chain covers a game day end to end. When
-# nothing tips within 12 h (overnight, off days, offseason) the run stops
-# without a successor and the hourly cron below restarts the chain; cron
+# nothing tips within 18 h (overnight, off days, offseason) the run stops
+# without a successor and the hourly cron below restarts the chain (18 h,
+# not 12, because GitHub delivers that cron only ~4x/day: a morning
+# delivery must be able to start the loop for an evening slate); cron
 # firings that arrive while a run is active wait as "pending" and are
 # cancelled when the successor is queued. Logic: nba_betting/data/snapshot_loop.py.
 #

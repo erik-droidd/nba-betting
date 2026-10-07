@@ -1272,9 +1272,9 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (193 tests across eighteen files).
+# 7. Full test suite (196 tests across eighteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 193 passed in < 5s.
+# Expect: 196 passed in ~5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
@@ -1282,8 +1282,8 @@ print('OK')
 #   the capture key, record-date game matching, legacy ESPN proxy blanking,
 #   repair_snapshots incl. post-game + wrong-event rows, ESPN-only slate,
 #   stamp-after-fetch, heartbeat dedupe)
-# test_snapshot_loop.py      — 16 tests (tip-paced cadence, idle vs budget
-#   stop, fetch-failure retries, error tolerance, push throttling)
+# test_snapshot_loop.py      — 19 tests (tip-paced cadence, 18 h idle window,
+#   idle vs budget stop, fetch-failure retries, error tolerance, push throttling)
 # test_espn_odds.py          — 15 tests (current + legacy ESPN moneyline
 #   shapes, de-vig, spread-proxy flag, single-source prob_movement,
 #   no bets priced off the spread proxy)
@@ -2086,4 +2086,32 @@ GBM ignores it until real ESPN moneylines accumulate.
 - Noted, not changed: 11 prediction-history entries from 2026-04-08..10
   store `edge` under an older ratio-style formula (e.g. 6.15); nothing
   reads the stored edge.
+
+**Follow-up (2026-10-07): first game night, verified.** A one-off cloud
+check plus a manual cross-check against ESPN play-by-play (4 preseason
+games, Oct 6 ET):
+
+- Chain: run 1 (16:41Z) made a budget stop at 22:00Z and dispatched its
+  successor the same second; the successor ran through the tips and made
+  an idle stop at 02:18Z with no further dispatch; the cron firing that
+  arrived meanwhile was cancelled as designed. 22 pushes, max gap 31.7 min.
+- Closing lines: the last capture of each game came 3.6 / 1.2 / 6.0 / ~1
+  min before its ACTUAL tip (23:11, 00:10, 01:11, ~02:14Z — about 10 min
+  after the listed times). Captures after the listed tip are correct: the
+  game is still `STATUS_SCHEDULED` and the line is still pre-game. (ESPN's
+  first play-by-play `wallclock` values can be bogus — GSW's jump ball was
+  stamped 01:53Z while ESPN still listed the game as scheduled at 02:13Z;
+  use the first plays with a running game clock and consistent stamps.)
+  All 84 ESPN lines carried moneylines; no Polymarket-vs-ESPN gap > 0.08.
+- Injury freeze: every playing team's lines were last written before its
+  actual tip; the Oct 6 file was untouched after 01:37Z.
+- **Restart gap → `IDLE_AFTER` 12 h → 18 h.** GitHub delivered the hourly
+  cron 4 times in 24 h (21:37, 01:32, 08:39, 16:28Z). The 08:39 run saw the
+  23:00Z tip 14.3 h away, stopped idle, and the chain only restarted at
+  16:28. With 18 h a morning delivery starts the loop (30-min cadence, so
+  it also captures morning lines and injury news), while the chain still
+  stops overnight (next first tip usually 20+ h after the last tip) —
+  except before weekend matinees, which it then bridges. For a guaranteed
+  restart, add an external daily `workflow_dispatch` (e.g. cron-job.org
+  with a fine-grained token, Actions: write).
 

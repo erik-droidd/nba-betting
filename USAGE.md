@@ -221,12 +221,12 @@ python3 -m nba_betting import-snapshots --path data/odds_snapshots/2026-04-18.js
 
 | Next tip-off | Odds capture every | Injury list every |
 |---|---|---|
-| more than 12 h away | — (run stops: "idle") | — |
-| 3–12 h | 30 min | 1 h |
+| more than 18 h away | — (run stops: "idle") | — |
+| 3–18 h | 30 min | 1 h |
 | 1–3 h | 15 min | 15 min within 2 h, else 1 h |
 | under 1 h | 5 min | 15 min |
 
-A run lasts up to 5.5 h (GitHub's job limit is 6 h), pushing its new files every 30 min. If games are still ahead when its time is up, it dispatches the next run itself (`workflow_dispatch` starts within seconds), so the chain covers a game day from morning to the last West Coast tip. After the last tip, the run stops without a successor. An hourly cron (`:17`) restarts the chain the next day; cron firings that land while a run is active wait as "pending" and get cancelled when the successor is queued, so a few cancelled runs per day in the Actions tab are normal. Unchanged lines are written at most every 30 min (heartbeat), which keeps the files small without losing any line value. The slate comes from ESPN only (`--skip-nba-api`): stats.nba.com never answers GitHub's IPs, and waiting out its timeouts used to cost ~4.6 min per capture.
+A run lasts up to 5.5 h (GitHub's job limit is 6 h), pushing its new files every 30 min. If games are still ahead when its time is up, it dispatches the next run itself (`workflow_dispatch` starts within seconds), so the chain covers a game day from morning to the last West Coast tip. After the last tip, the run stops without a successor (the next tip is usually 20+ h away). An hourly cron (`:17`) restarts the chain the next day — any delivery within 18 h of the first tip starts it, which matters because GitHub delivers that cron only ~4 times a day (2026-10-07: 01:32, 08:39, 16:28 UTC); cron firings that land while a run is active wait as "pending" and get cancelled when the successor is queued, so a few cancelled runs per day in the Actions tab are normal. Unchanged lines are written at most every 30 min (heartbeat), which keeps the files small without losing any line value. The slate comes from ESPN only (`--skip-nba-api`): stats.nba.com never answers GitHub's IPs, and waiting out its timeouts used to cost ~4.6 min per capture.
 
 Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py); workflow: [.github/workflows/snapshot-odds.yml](.github/workflows/snapshot-odds.yml); commit/push: [.github/scripts/commit-snapshots.sh](.github/scripts/commit-snapshots.sh) (odds files merge as a union via `.gitattributes`, so concurrent appends never conflict).
 
@@ -422,7 +422,7 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-193 fast unit tests (~4 s); the main files:
+196 fast unit tests (~5 s); the main files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
 - **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
@@ -430,7 +430,7 @@ cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 - **`test_simulate_horizon.py`** (8): data-driven horizon projection, density scaling, edge-case fallbacks.
 - **`test_exhibition_filter.py`** (9): preseason/All-Star games skipped by the game fetchers (so `predict` never stakes on them).
 - **`test_snapshot_jsonl.py`** (26): JSONL round-trip, idempotence on the capture key, game matching (late-tip captures stay on tonight's game; no guessing for preseason), legacy ESPN spread-proxy blanking, `repair-snapshots`, ESPN-only slate, timestamp after fetch, per-date ESPN odds, heartbeat dedupe.
-- **`test_snapshot_loop.py`** (16): tip-paced cadence, idle vs budget stop (successor dispatch), fetch-failure retries, error tolerance, push throttling.
+- **`test_snapshot_loop.py`** (19): tip-paced cadence, 18 h idle window (a morning cron delivery starts the loop; it still stops overnight), idle vs budget stop (successor dispatch), fetch-failure retries, error tolerance, push throttling.
 - **`test_espn_odds.py`** (15): moneyline parsing from ESPN's current and legacy shapes, de-vig, spread-proxy flagging, single-source `prob_movement`, no bets priced off the spread proxy.
 - **`test_injury_jsonl.py`** (10): ET-dated injury files, per-team tip-off freeze, scoreboard tip detection, idempotent import.
 - **`test_playoff_sync_and_resolve.py`** (10): play-in/playoff game union, `update_results` date matching, `record_predictions` ET-date filing.
@@ -509,7 +509,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (193 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (196 tests) |
 
 ---
 
@@ -590,7 +590,7 @@ python3 -m nba_betting simulate --n-sims 50000
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/ -v                                 # 193 unit tests (run after any code change)
+pytest tests/ -v                                 # 196 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN
