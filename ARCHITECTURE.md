@@ -2113,7 +2113,7 @@ games, Oct 6 ET):
   stops overnight (next first tip usually 20+ h after the last tip) —
   except before weekend matinees, which it then bridges.
 - **External daily trigger (set up 2026-10-07).** A cron-job.org job POSTs
-  the workflow's `workflow_dispatch` at 09:05 and 18:05 UTC with a
+  the workflow's `workflow_dispatch` at 09:15 and 18:15 UTC with a
   fine-grained token (`nba-betting` only, Actions: write, no expiration),
   so the morning restart no longer depends on GitHub's cron. Setup and
   troubleshooting: USAGE.md "External daily trigger". Tested: 200 +

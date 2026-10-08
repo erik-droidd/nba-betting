@@ -239,7 +239,7 @@ Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py);
 
    The current token has no expiration. Its reach is limited to starting, cancelling or deleting this repo's workflow runs. Revoke it on GitHub if your cron-job.org account is ever compromised.
 2. **cron-job.org job** "nba-betting snapshot loop kick", with time zone **UTC**:
-   - **Schedule:** daily at **09:05** (starts the day's loop; the 18 h window covers first tips up to 03:00 UTC) and **18:05** (backup in case a run died during the day).
+   - **Schedule:** daily at **09:15** (starts the day's loop; the 18 h window covers first tips up to 03:15 UTC) and **18:15** (backup in case a run died during the day).
    - **Request:** `POST https://api.github.com/repos/erik-droidd/nba-betting/actions/workflows/snapshot-odds.yml/dispatches`
    - **Headers:**
      - `Authorization: Bearer github_pat_…` (the full token after `Bearer `)
