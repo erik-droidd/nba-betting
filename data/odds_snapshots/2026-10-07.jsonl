@@ -227,3 +227,6 @@
 {"game_date":"2026-10-07","home_team_abbr":"POR","away_team_abbr":"GSW","source":"polymarket","timestamp":"2026-10-07T23:46:56","home_prob":0.805,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-07","home_team_abbr":"MEM","away_team_abbr":"ORL","source":"espn","timestamp":"2026-10-07T23:51:57","home_prob":0.4675324675324675,"spread":1.5,"over_under":234.5,"home_moneyline":105.0,"away_moneyline":-125.0,"game_id":null}
 {"game_date":"2026-10-07","home_team_abbr":"POR","away_team_abbr":"GSW","source":"polymarket","timestamp":"2026-10-07T23:51:57","home_prob":0.815,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-07","home_team_abbr":"MEM","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-10-07T23:57:21","home_prob":0.465,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-07","home_team_abbr":"CHI","away_team_abbr":"PHX","source":"polymarket","timestamp":"2026-10-07T23:57:21","home_prob":0.425,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-07","home_team_abbr":"CHI","away_team_abbr":"PHX","source":"espn","timestamp":"2026-10-07T23:57:21","home_prob":0.42794036443953615,"spread":2.5,"over_under":229.5,"home_moneyline":124.0,"away_moneyline":-148.0,"game_id":null}
