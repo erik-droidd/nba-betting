@@ -26,3 +26,6 @@
 {"game_date":"2026-10-09","home_team_abbr":"DAL","away_team_abbr":"HOU","source":"polymarket","timestamp":"2026-10-09T03:21:22","home_prob":0.445,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-09","home_team_abbr":"DAL","away_team_abbr":"HOU","source":"espn","timestamp":"2026-10-09T03:21:22","home_prob":0.4572564612326044,"spread":2.5,"over_under":221.5,"home_moneyline":110.0,"away_moneyline":-130.0,"game_id":null}
 {"game_date":"2026-10-09","home_team_abbr":"CHI","away_team_abbr":"MEM","source":"polymarket","timestamp":"2026-10-09T03:21:22","home_prob":0.565,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-09","home_team_abbr":"DAL","away_team_abbr":"HOU","source":"polymarket","timestamp":"2026-10-09T03:51:50","home_prob":0.445,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-09","home_team_abbr":"DAL","away_team_abbr":"HOU","source":"espn","timestamp":"2026-10-09T03:51:50","home_prob":0.448558885283451,"spread":2.5,"over_under":222.5,"home_moneyline":114.0,"away_moneyline":-135.0,"game_id":null}
+{"game_date":"2026-10-09","home_team_abbr":"CHI","away_team_abbr":"MEM","source":"polymarket","timestamp":"2026-10-09T03:51:50","home_prob":0.565,"spread":null,"over_under":null,"game_id":null}
