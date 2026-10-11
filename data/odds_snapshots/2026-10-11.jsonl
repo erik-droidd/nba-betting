@@ -36,3 +36,13 @@
 {"game_date":"2026-10-11","home_team_abbr":"CLE","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-10-11T03:49:15","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-11","home_team_abbr":"CHA","away_team_abbr":"MIL","source":"polymarket","timestamp":"2026-10-11T03:49:15","home_prob":0.575,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-11","home_team_abbr":"DEN","away_team_abbr":"CHI","source":"polymarket","timestamp":"2026-10-11T03:49:15","home_prob":0.53,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"HOU","away_team_abbr":"DAL","source":"polymarket","timestamp":"2026-10-11T03:50:18","home_prob":0.53,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"HOU","away_team_abbr":"DAL","source":"espn","timestamp":"2026-10-11T03:50:18","home_prob":0.551441114716549,"spread":-2.5,"over_under":230.5,"home_moneyline":-135.0,"away_moneyline":114.0,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"CLE","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-10-11T03:50:18","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"CHA","away_team_abbr":"MIL","source":"polymarket","timestamp":"2026-10-11T03:50:18","home_prob":0.575,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"DEN","away_team_abbr":"CHI","source":"polymarket","timestamp":"2026-10-11T03:50:18","home_prob":0.53,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"HOU","away_team_abbr":"DAL","source":"polymarket","timestamp":"2026-10-11T04:20:45","home_prob":0.55,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"HOU","away_team_abbr":"DAL","source":"espn","timestamp":"2026-10-11T04:20:45","home_prob":0.551441114716549,"spread":-2.5,"over_under":230.5,"home_moneyline":-135.0,"away_moneyline":114.0,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"CLE","away_team_abbr":"ORL","source":"polymarket","timestamp":"2026-10-11T04:20:45","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"CHA","away_team_abbr":"MIL","source":"polymarket","timestamp":"2026-10-11T04:20:45","home_prob":0.575,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-11","home_team_abbr":"DEN","away_team_abbr":"CHI","source":"polymarket","timestamp":"2026-10-11T04:20:45","home_prob":0.53,"spread":null,"over_under":null,"game_id":null}
