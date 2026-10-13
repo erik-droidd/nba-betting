@@ -346,3 +346,4 @@
 {"game_date":"2026-10-12","home_team_abbr":"NYK","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-10-12T23:38:18","home_prob":0.485,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-12","home_team_abbr":"UTA","away_team_abbr":"SAS","source":"polymarket","timestamp":"2026-10-12T23:43:19","home_prob":0.645,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-12","home_team_abbr":"UTA","away_team_abbr":"SAS","source":"espn","timestamp":"2026-10-12T23:43:19","home_prob":0.6224665518611737,"spread":-4.5,"over_under":226.5,"home_moneyline":-185.0,"away_moneyline":154.0,"game_id":null}
+{"game_date":"2026-10-12","home_team_abbr":"UTA","away_team_abbr":"SAS","source":"espn","timestamp":"2026-10-12T23:58:48","home_prob":0.6224665518611737,"spread":-5.5,"over_under":226.5,"home_moneyline":-185.0,"away_moneyline":154.0,"game_id":null}
