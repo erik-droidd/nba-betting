@@ -383,3 +383,4 @@
 {"game_date":"2026-10-13","home_team_abbr":"LAL","away_team_abbr":"GSW","source":"espn","timestamp":"2026-10-13T23:51:55","home_prob":0.5324675324675325,"spread":-2.5,"over_under":229.5,"home_moneyline":-125.0,"away_moneyline":105.0,"game_id":null}
 {"game_date":"2026-10-13","home_team_abbr":"SAC","away_team_abbr":"POR","source":"polymarket","timestamp":"2026-10-13T23:51:55","home_prob":0.415,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-13","home_team_abbr":"SAC","away_team_abbr":"POR","source":"espn","timestamp":"2026-10-13T23:51:55","home_prob":0.42794036443953615,"spread":2.5,"over_under":229.5,"home_moneyline":124.0,"away_moneyline":-148.0,"game_id":null}
+{"game_date":"2026-10-13","home_team_abbr":"OKC","away_team_abbr":"IND","source":"polymarket","timestamp":"2026-10-13T23:57:22","home_prob":0.675,"spread":null,"over_under":null,"game_id":null}
