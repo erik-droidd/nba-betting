@@ -154,3 +154,8 @@
 {"game_date":"2026-10-15","home_team_abbr":"NYK","away_team_abbr":"TOR","source":"espn","timestamp":"2026-10-15T21:54:40","home_prob":0.644729178800233,"spread":-5.5,"over_under":226.5,"home_moneyline":-205.0,"away_moneyline":170.0,"game_id":null}
 {"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-15T21:54:40","home_prob":0.415,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"espn","timestamp":"2026-10-15T21:54:40","home_prob":0.4170073589533933,"spread":4.5,"over_under":226.5,"home_moneyline":130.0,"away_moneyline":-155.0,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"NYK","away_team_abbr":"TOR","source":"polymarket","timestamp":"2026-10-15T22:09:43","home_prob":0.655,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-15T22:09:43","home_prob":0.42,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"espn","timestamp":"2026-10-15T22:09:43","home_prob":0.4170073589533933,"spread":3.5,"over_under":226.5,"home_moneyline":130.0,"away_moneyline":-155.0,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"NYK","away_team_abbr":"TOR","source":"espn","timestamp":"2026-10-15T22:24:44","home_prob":0.644729178800233,"spread":-5.5,"over_under":226.5,"home_moneyline":-205.0,"away_moneyline":170.0,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-15T22:24:44","home_prob":0.425,"spread":null,"over_under":null,"game_id":null}
