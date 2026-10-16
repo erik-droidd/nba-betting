@@ -3,3 +3,17 @@
 {"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-16T00:23:22","home_prob":0.425,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"espn","timestamp":"2026-10-16T00:23:22","home_prob":0.42794036443953615,"spread":2.5,"over_under":229.5,"home_moneyline":124.0,"away_moneyline":-148.0,"game_id":null}
 {"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-16T00:28:23","home_prob":0.435,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"polymarket","timestamp":"2026-10-16T00:38:50","home_prob":0.445,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-15","home_team_abbr":"HOU","away_team_abbr":"OKC","source":"espn","timestamp":"2026-10-16T00:38:50","home_prob":0.43650793650793646,"spread":2.5,"over_under":229.5,"home_moneyline":120.0,"away_moneyline":-142.0,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"ORL","away_team_abbr":"MIA","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"PHI","away_team_abbr":"BOS","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.665,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"DET","away_team_abbr":"TOR","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.735,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"IND","away_team_abbr":"MIL","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.645,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"DAL","away_team_abbr":"ATL","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.515,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"SAS","away_team_abbr":"SAC","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.74,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"MEM","away_team_abbr":"CHA","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.48,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"NOP","away_team_abbr":"WAS","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.485,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"CHI","away_team_abbr":"MIN","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.445,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"GSW","away_team_abbr":"POR","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.55,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"PHX","away_team_abbr":"UTA","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.58,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-16","home_team_abbr":"LAL","away_team_abbr":"DEN","source":"polymarket","timestamp":"2026-10-16T00:43:52","home_prob":0.69,"spread":null,"over_under":null,"game_id":null}
