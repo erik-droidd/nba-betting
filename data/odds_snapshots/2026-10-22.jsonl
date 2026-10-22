@@ -39,3 +39,7 @@
 {"game_date":"2026-10-21","home_team_abbr":"POR","away_team_abbr":"PHX","source":"polymarket","timestamp":"2026-10-22T02:13:34","home_prob":0.615,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-21","home_team_abbr":"LAC","away_team_abbr":"SAC","source":"polymarket","timestamp":"2026-10-22T02:18:36","home_prob":0.635,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-10-21","home_team_abbr":"LAC","away_team_abbr":"SAC","source":"espn","timestamp":"2026-10-22T02:18:36","home_prob":0.6224665518611737,"spread":-5.5,"over_under":226.5,"home_moneyline":-185.0,"away_moneyline":154.0,"game_id":null}
+{"game_date":"2026-10-22","home_team_abbr":"PHI","away_team_abbr":"CLE","source":"polymarket","timestamp":"2026-10-22T02:44:31","home_prob":0.575,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-22","home_team_abbr":"PHI","away_team_abbr":"CLE","source":"espn","timestamp":"2026-10-22T02:44:31","home_prob":0.5829926410466066,"spread":-3.5,"over_under":235.5,"home_moneyline":-155.0,"away_moneyline":130.0,"game_id":null}
+{"game_date":"2026-10-22","home_team_abbr":"OKC","away_team_abbr":"DEN","source":"polymarket","timestamp":"2026-10-22T02:44:31","home_prob":0.735,"spread":null,"over_under":null,"game_id":null}
+{"game_date":"2026-10-22","home_team_abbr":"OKC","away_team_abbr":"DEN","source":"espn","timestamp":"2026-10-22T02:44:31","home_prob":0.7238029146426094,"spread":-7.5,"over_under":235.5,"home_moneyline":-298.0,"away_moneyline":250.0,"game_id":null}
