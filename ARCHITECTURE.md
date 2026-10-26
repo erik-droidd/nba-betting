@@ -1276,16 +1276,17 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (203 tests across nineteen files).
+# 7. Full test suite (204 tests across nineteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 203 passed in ~5s.
+# Expect: 204 passed in ~5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
-# test_snapshot_jsonl.py     — 27 tests (JSONL round-trip, idempotence on
+# test_snapshot_jsonl.py     — 28 tests (JSONL round-trip, idempotence on
 #   the capture key, record-date game matching, legacy ESPN proxy blanking,
 #   repair_snapshots incl. post-game + wrong-event rows, ESPN-only slate,
-#   stamp-after-fetch, heartbeat dedupe, no dedupe in a game's final hour)
+#   stamp-after-fetch, heartbeat dedupe, no dedupe in a game's final hour,
+#   no exhibitions against non-NBA clubs)
 # test_snapshot_health.py    —  5 tests (actual-tip estimate, union-of-
 #   captures freshness, status-race tolerance, freeze violations)
 # test_snapshot_loop.py      — 19 tests (tip-paced cadence, 18 h idle window,
@@ -2155,6 +2156,17 @@ observation a median **2.9 min** before the actual tip, 41/43 within
 - **Push gap.** Pushes happen right after a capture once 30 min have
   passed, so at a 15-min cadence one can wait for the next capture (45 min
   on opening night). Harmless: data stays in the run's working copy. Not changed.
+- **Exhibition vs a non-NBA club.** 2026-10-12 POR vs "LON" was captured
+  (13 lines) and reported as `unknown team` on every daily import. The
+  ESPN slate now skips opponents whose ESPN team id isn't one of the 30 NBA
+  franchises (by id, so a renamed NBA code still gets through and still
+  errors loudly at import), and the 13 lines were removed from
+  `data/odds_snapshots/2026-10-12.jsonl`.
+- **Local steps done:** `sync` stored the 43 games and all 43 link to their
+  snapshots (3412 rows); `import-snapshots` has 0 errors; `diagnose` lists
+  the regular-season slate again. `market-eval` still shows n=124: it makes
+  one fold per July-1 season and skips folds under 50 games, so the 2026-27
+  closing lines start counting once 50 games are synced (Oct 27).
 - **cron-job.org shifted with daylight saving** (10:15/19:15 UTC from Oct
   25): the job followed a European time zone, not UTC. Fix: set the job's
   time zone to UTC in cron-job.org (USAGE.md "External daily trigger").

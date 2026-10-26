@@ -459,7 +459,7 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-203 fast unit tests (~5 s); the main files:
+204 fast unit tests (~5 s); the main files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
 - **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
@@ -547,7 +547,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (203 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (204 tests) |
 
 ---
 
@@ -629,7 +629,7 @@ python3 -m nba_betting simulate --n-sims 50000
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/ -v                                 # 203 unit tests (run after any code change)
+pytest tests/ -v                                 # 204 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN

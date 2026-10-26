@@ -1127,3 +1127,18 @@ def test_capture_never_dedupes_in_a_games_final_hour(tmp_path, monkeypatch):
            for h, m in ((22, 0), (22, 10), (22, 35), (22, 40), (23, 35))]
     # 22:00 written; 22:10 deduped (>1 h out); 22:35, 22:40 and 23:35 (past listed tip) all written
     assert [o["written"] for o in out] == [1, 0, 1, 1, 1]
+
+
+def test_capture_skips_exhibitions_against_non_nba_clubs(tmp_path, monkeypatch):
+    """2026-10-12: Portland hosted 'LON' (a non-NBA club); its 13 lines never
+    joined a game and turned up as import errors on every daily import."""
+    from nba_betting.data import snapshot_jsonl as jsonl
+    slate = _espn_slate() + [{
+        "espn_event_id": 2, "date": "2026-10-07T23:30Z", "status": "STATUS_SCHEDULED",
+        "home_team": {"espn_id": 22, "abbr": "POR", "name": "Trail Blazers"},
+        "away_team": {"espn_id": 0, "abbr": "LON", "name": "London Lions"}, "odds": {},
+    }]
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [], slate=slate)
+    res = jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, timestamp=datetime(2026, 10, 7, 12, 0))
+    assert res["games"] == 1
+

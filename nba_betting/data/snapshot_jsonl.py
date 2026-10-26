@@ -212,7 +212,7 @@ def _fetch_games_via_espn(days_ahead: int = 2, errors: list[str] | None = None) 
     Game dicts have the same shape as ``_game_dict_from_v3`` so
     ``capture_snapshot_to_jsonl`` doesn't have to branch on the source.
     """
-    from nba_betting.data.espn import fetch_scoreboard
+    from nba_betting.data.espn import ESPN_TEAMS, fetch_scoreboard
 
     def _fetch_day(target: date) -> list[dict]:
         date_str = target.strftime("%Y%m%d")
@@ -232,6 +232,13 @@ def _fetch_games_via_espn(days_ahead: int = 2, errors: list[str] | None = None) 
             home = ev.get("home_team") or {}
             away = ev.get("away_team") or {}
             if not home.get("abbr") or not away.get("abbr"):
+                continue
+            # Preseason exhibitions against non-NBA clubs (2026-10-12 POR vs
+            # "LON") never join a game and only produced import errors. Decide
+            # by ESPN team id, not abbreviation: if ESPN renames an NBA team's
+            # code, the id still matches and the import flags the new code
+            # loudly instead of the team silently disappearing.
+            if int(home.get("espn_id") or 0) not in ESPN_TEAMS or int(away.get("espn_id") or 0) not in ESPN_TEAMS:
                 continue
             games.append({
                 # ESPN event ID is NOT a valid ``games.id`` (NBA API
