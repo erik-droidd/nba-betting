@@ -1,5 +1,35 @@
 # NBA Betting System — Usage Guide
 
+## Quick start: each time you run predictions
+
+Open a terminal and run these lines in order (about a minute):
+
+```bash
+cd "NBA Betting"                                  # go to the project folder
+source .venv/bin/activate                         # once per terminal window
+python3 -m nba_betting import-snapshots --pull
+python3 -m nba_betting sync
+python3 -m nba_betting predict --bankroll 1000    # use your current bankroll
+```
+
+1. **`import-snapshots --pull`** downloads what GitHub collected since your last run and loads it into your local database: the odds, captured every few minutes up to each tip-off, and the injury lists. It also picks up any code updates. The last line shows the latest nightly health report; `HEALTHY` is what you want.
+2. **`sync`** fetches the final scores and player stats of the games played since your last run (from NBA.com). It also updates the Elo ratings, links the captured odds to those games, and settles your pending predictions.
+3. **`predict --bankroll <amount>`** lists today's games with:
+   - the model's win probability, the market price and the edge;
+   - how much to bet: quarter-Kelly, at most 5% of your bankroll per bet and 25% in total.
+
+   `NO BET` means there's no edge worth taking. Preseason games are skipped. Your predictions are saved, so `performance` can score them later.
+
+Then place the bets you choose on Polymarket or your book. Stick to STRONG and MODERATE signals and never bet more than the suggested size (see [Step 3: Place Bets](#step-3-place-bets)).
+
+**Every now and then:**
+- `python3 -m nba_betting performance` shows how your past predictions and bets did (accuracy, ROI, closing-line value).
+- `python3 -m nba_betting train` retrains the model on the latest games. Once a month is plenty.
+
+**Runs by itself, nothing to do:** during the season, GitHub captures odds and injuries around the clock and writes a health report every morning. If a night's data looks wrong, it opens a GitHub issue and you get an email; otherwise you hear nothing. Details: [Running Snapshots Remotely](#running-snapshots-remotely-github-actions).
+
+---
+
 ## Overview
 
 This system predicts NBA game outcomes using an ensemble model (Elo ratings + gradient boosting), compares predictions against market odds (Polymarket + ESPN/DraftKings), and recommends bets when it finds an edge. It uses a **Bayesian-shrunken** model probability (treating the market as a strong prior), an **asymmetric bet-side floor** that kills lottery-ticket bets, quarter-Kelly sizing, and generates plain-English explanations for each recommendation.
@@ -61,15 +91,16 @@ Fetches rosters and depth charts from ESPN for all 30 teams into the `player_sta
 
 ## Daily Workflow
 
-Run these commands on game days to get betting recommendations.
+The [Quick start](#quick-start-each-time-you-run-predictions) at the top is the short version; this section explains each step in detail.
 
 ### Step 1: Sync Today's Data
 
 ```bash
-python3 -m nba_betting sync
+python3 -m nba_betting import-snapshots --pull   # odds + injuries GitHub captured since your last run
+python3 -m nba_betting sync                      # new results, Elo, links the odds to finished games
 ```
 
-Fetches any new game results since your last sync. Updates Elo ratings and resolves pending predictions. Run this once per day, ideally in the morning or before games start.
+`import-snapshots --pull` loads the odds and injury snapshots the GitHub Actions loop committed (see [Running Snapshots Remotely](#running-snapshots-remotely-github-actions)). `sync` fetches any new game results since your last sync, updates Elo ratings, attaches those snapshots to the newly stored games and resolves pending predictions. Run both once per day, ideally in the morning or before games start.
 
 ### Step 2: Get Predictions
 
@@ -188,7 +219,7 @@ Records a point-in-time snapshot of current Polymarket + ESPN odds for today's g
 
 Snapshots are **automatically deduplicated**: if prices haven't moved by more than 0.5% since the last snapshot within 4 hours, the row is skipped, so running this frequently is safe.
 
-**Run this on a cron every 30–60 minutes during the season** (e.g. `*/30 * * * * cd "NBA Betting" && .venv/bin/python -m nba_betting snapshot-odds`). After ~30 days of snapshots the `odds_disagreement` feature becomes meaningful for retraining.
+**You don't need to run this yourself.** During the season the GitHub Actions loop below captures odds every 5–30 minutes up to each tip-off, and `predict` also stores a snapshot whenever you run it. The local command is only for capturing by hand. After a few weeks of snapshots the `odds_disagreement` feature becomes meaningful for retraining.
 
 > **Note**: odds snapshots accumulate forward — historical games in the training set have these features set to 0.0. The model learns to use them only when they're non-zero (i.e., live season data).
 
@@ -545,16 +576,15 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 |------|---------|-----|
 | First time | `sync --seasons 5` then `train` | Load data and build model |
 | Start of season | `sync --seasons 5` then `train` | Retrain with fresh data (the season string is derived from the date — nothing to edit) |
-| Daily (morning) | `sync` | Get yesterday's results, update Elo |
-| Before games | `predict` | Get today's recommendations |
-| Every 30–60 min (season) | `snapshot-odds` | Capture line movement; run on a cron (or GitHub Actions — see §Step 2b) |
-| Daily (morning, EU users) | `import-snapshots --pull` | Git-pull + load the odds AND injury JSONL snapshots written overnight by GitHub Actions |
+| Each time you predict | `import-snapshots --pull`, then `sync`, then `predict` | Load GitHub's odds + injury snapshots, get results and update Elo, get today's recommendations (see [Quick start](#quick-start-each-time-you-run-predictions)) |
+| Automatic (GitHub, in season) | snapshot loop + nightly health report | Odds every 5–30 min up to tip-off, injury lists, a closing-line health report each morning; an issue email only if a night is unhealthy. Nothing to run |
 | After games | `sync` then `performance` | Check results and accuracy |
 | After games | `clv` | Review Closing Line Value skill metric |
 | Weekly | `backtest --real-odds` | Realistic ROI estimate with shrinkage applied |
 | Monthly | `train` | Retrain model with latest data |
-| Monthly | `sync-players` | Update player rosters and depth charts |
+| Optional | `sync-players` | Player rosters and depth charts (not used by predictions) |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
+| When ≥ 300 games have a closing line (mid-season) | `market-eval` | Model vs the real closing line; sets the market-shrinkage λ and decides whether spread picks get a stake |
 | As needed | `diagnose` | Debug issues with predictions |
 | After any code change | `pytest tests/ -v` | Guard against silent regressions (207 tests) |
 

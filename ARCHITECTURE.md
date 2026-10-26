@@ -1328,7 +1328,8 @@ print('OK')
 #   picks the sharper source, cover/push accounting, paired t)
 
 # 8. Model vs the real closing line (the knob-setting harness; verdict is
-#    withheld until ~300 games have a closing line — a season of the cron).
+#    withheld until ~300 games have a closing line — roughly mid-season with
+#    the snapshot loop; 2026-27 games count once that season has >= 50).
 .venv/bin/python3 -m nba_betting market-eval
 
 # 8. Check how much historical data has accumulated for the new
@@ -1714,10 +1715,11 @@ Review pass after both data streams reached `READY` tier:
 
 ### 10.2 Remaining caveats
 
-- **Real-odds coverage is bootstrapping** — `snapshot-odds` only
-  accumulates data going forward, so `--real-odds` backtests will have
-  low coverage until a cron has been running for at least a few weeks
-  of NBA games. Until then the Elo proxy remains the default.
+- **Real-odds coverage is bootstrapping** — snapshots only accumulate
+  going forward: 2026 playoffs + preseason, then the GitHub Actions loop
+  (§10.1h) captures every regular-season game from 2026-10-20. `--real-odds`
+  backtests and `market-eval` become informative around mid-season (~300
+  games with a closing line). Until then the Elo proxy remains the default.
 - **Injury features are likewise forward-looking** — the historical
   injury archive is only populated from the day the collector starts
   running. Old training games have `injury_impact_*` = 0; the model
