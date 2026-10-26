@@ -238,8 +238,11 @@ Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py);
    - Repository permissions → **Actions: Read and write**, nothing else.
 
    The current token has no expiration. Its reach is limited to starting, cancelling or deleting this repo's workflow runs. Revoke it on GitHub if your cron-job.org account is ever compromised.
-2. **cron-job.org job** "nba-betting snapshot loop kick", with time zone **UTC**. Set it on the job's *Common* tab; jobs otherwise use the account's time zone. A European time zone shifts both triggers by an hour at every daylight-saving change (seen 2026-10-25: 10:15/19:15 UTC instead of 09:15/18:15). That's harmless, but it no longer matches this page.
-   - **Schedule:** daily at **09:15** (starts the day's loop; the 18 h window covers first tips up to 03:15 UTC) and **18:15** (backup in case a run died during the day).
+2. **cron-job.org job** "nba-betting snapshot loop kick", on the account's European time zone (Vienna):
+   - **Schedule:** daily at **11:15** and **20:15 local time**. In UTC that's **09:15 / 18:15 in summer** and **10:15 / 19:15 in winter**, because the job follows European daylight saving (it shifted on 2026-10-25).
+     - The morning trigger starts the day's loop. Even at 10:15 UTC the 18 h window covers first tips up to 04:15 UTC.
+     - The evening trigger is a backup in case a run died during the day.
+   - Either season works. NBA tip-offs are fixed in US Eastern time, so they shift in UTC too (US clocks change about a week after Europe's). When reviewing run history, expect the `workflow_dispatch` runs by `erik-droidd` at those times; an hour's difference between seasons is not a failure.
    - **Request:** `POST https://api.github.com/repos/erik-droidd/nba-betting/actions/workflows/snapshot-odds.yml/dispatches`
    - **Headers:**
      - `Authorization: Bearer github_pat_…` (the full token after `Bearer `)
