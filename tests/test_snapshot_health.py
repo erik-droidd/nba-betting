@@ -86,3 +86,80 @@ def test_a_later_capture_of_other_games_does_not_count_as_seeing_this_one():
     h = game_health(tip=TIP, records=mine, injury_rows=None, teams=("GSW", "LAL"),
                     capture_times=[TIP - timedelta(minutes=25), TIP + timedelta(seconds=30)])
     assert round(h["last_observed_min"]) == 25
+
+
+# ---------------------------------------------------------------- nightly
+
+def _board_event(status, eid="1", home=("GSW", 9), away=("LAL", 13)):
+    return {"status": status, "season_slug": "regular-season", "espn_event_id": eid, "date": "2026-10-07T02:00Z",
+            "home_team": {"abbr": home[0], "espn_id": home[1]}, "away_team": {"abbr": away[0], "espn_id": away[1]}}
+
+
+def _write_odds(odds_dir, minutes_before=(180, 30, 4)):
+    odds_dir.mkdir(parents=True, exist_ok=True)
+    lines = [_rec(TIP - timedelta(minutes=m)) for m in minutes_before]
+    (odds_dir / "2026-10-07.jsonl").write_text("\n".join(json.dumps(r) for r in lines) + "\n")
+
+
+def test_write_daily_reports_waits_for_final_then_writes_once(tmp_path):
+    from nba_betting.data.snapshot_health import write_daily_reports
+    _write_odds(tmp_path / "odds")
+    boards = {"20261006": [_board_event("STATUS_IN_PROGRESS")], "20261005": [], "20261004": []}
+    kw = dict(today_et=date(2026, 10, 7), health_dir=tmp_path / "h", odds_dir=tmp_path / "odds",
+              injury_dir=tmp_path / "inj", plays_for=lambda eid: _plays_with_bogus_start())
+
+    first = write_daily_reports(scoreboard=lambda d: boards[d], **kw)
+    assert [(r["date"], r["status"]) for r in first] == [("2026-10-04", "NO GAMES"), ("2026-10-05", "NO GAMES")]
+    assert not (tmp_path / "h" / "2026-10-06.json").exists()          # game still on
+
+    boards["20261006"] = [_board_event("STATUS_FINAL"),
+                          _board_event("STATUS_FINAL", "9", home=("POR", 22), away=("LON", 0))]   # non-NBA: ignored
+    calls = []
+    second = write_daily_reports(scoreboard=lambda d: calls.append(d) or boards[d], **kw)
+    assert [(r["date"], r["status"]) for r in second] == [("2026-10-06", "HEALTHY")]
+    assert calls == ["20261006"]                                           # finished days aren't re-checked
+    saved = json.loads((tmp_path / "h" / "2026-10-06.json").read_text())
+    assert saved["summary"]["games"] == 1 and saved["games"][0]["game"] == "LAL@GSW"
+    assert saved["games"][0]["tip"].endswith("Z")
+    assert write_daily_reports(scoreboard=lambda d: boards[d], **kw) == []
+
+
+def test_unhealthy_night_and_issue_body(tmp_path):
+    from nba_betting.data.snapshot_health import issue_body, write_daily_reports
+    _write_odds(tmp_path / "odds", minutes_before=(180, 25))               # last seen 25 min before tip
+    rep, = write_daily_reports(today_et=date(2026, 10, 7), lookback_days=1, health_dir=tmp_path / "h",
+                               odds_dir=tmp_path / "odds", injury_dir=tmp_path / "inj",
+                               scoreboard=lambda d: [_board_event("STATUS_FINAL")],
+                               plays_for=lambda eid: _plays_with_bogus_start())
+    assert rep["status"] == "CHECK"
+    body = issue_body(rep, mention="erik-droidd")
+    assert "**2026-10-06**" in body and "**CHECK**" in body and "LAL@GSW" in body and body.rstrip().endswith("@erik-droidd")
+
+
+def test_nightly_cli_opens_one_issue_per_bad_night(monkeypatch, tmp_path):
+    import subprocess
+    from typer.testing import CliRunner
+    from nba_betting import cli
+    from nba_betting.data import snapshot_health
+    bad = {"date": "2026-10-06", "status": "CHECK", "games": [], "summary": {
+        "games": 1, "measured": 1, "median_min": 25.0, "max_min": 25.0, "within_10": 0,
+        "post_tip_rows": 0, "missing": 0, "freeze_violations": 0, "espn_ml_share": 1.0}}
+    monkeypatch.setattr(snapshot_health, "write_daily_reports", lambda **kw: [bad])
+    monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "erik-droidd")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[:3])
+        out = existing if cmd[:3] == ["gh", "issue", "list"] else "https://github.com/x/y/issues/1"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    existing = ""
+    res = CliRunner().invoke(cli.app, ["snapshot-health", "--nightly", "--open-issues"])
+    assert res.exit_code == 0, res.output
+    assert calls == [["gh", "issue", "list"], ["gh", "issue", "create"]]
+
+    calls.clear()
+    existing = "Snapshot health check failed: 2026-10-06\n"
+    CliRunner().invoke(cli.app, ["snapshot-health", "--nightly", "--open-issues"])
+    assert calls == [["gh", "issue", "list"]]                              # already reported: no duplicate

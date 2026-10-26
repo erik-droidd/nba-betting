@@ -7,7 +7,10 @@ set -uo pipefail
 git config user.name >/dev/null || git config user.name "github-actions[bot]"
 git config user.email >/dev/null || git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-paths=(data/odds_snapshots data/injury_snapshots)
+paths=()
+for p in data/odds_snapshots data/injury_snapshots data/snapshot_health; do
+  [ -e "$p" ] && paths+=("$p")   # `git add` of a missing path aborts the whole add
+done
 if [ -n "$(git status --porcelain -- "${paths[@]}")" ]; then
   git add -- "${paths[@]}"
   # [skip ci] keeps the push from triggering other workflows.

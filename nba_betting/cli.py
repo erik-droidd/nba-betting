@@ -1701,6 +1701,18 @@ def import_snapshots(
         for e in inj["errors"][:10]:
             console.print(f"[yellow]  warn: {e}[/yellow]")
 
+    # Nightly closing-line health, written by the GitHub runner each morning.
+    from nba_betting.data.snapshot_health import latest_reports, summary_line
+    reports = latest_reports(n=7)
+    if reports:
+        last = reports[-1]
+        color = {"HEALTHY": "green", "NO GAMES": "dim"}.get(last["status"], "yellow")
+        console.print(f"[{color}]snapshot health {last['date']} {last['status']}[/] {summary_line(last['summary'])}")
+        for r in reports[:-1]:
+            if r["status"] == "CHECK":
+                console.print(f"[yellow]  unhealthy night in the last week: {r['date']} "
+                              f"(data/snapshot_health/{r['date']}.json)[/yellow]")
+
 
 @app.command(name="snapshot-loop")
 def snapshot_loop(
@@ -1776,11 +1788,20 @@ def snapshot_loop(
 
 @app.command(name="snapshot-health")
 def snapshot_health_cmd(
-    start: str = typer.Option(..., "--start", help="First ET game date, YYYY-MM-DD."),
+    start: str = typer.Option(None, "--start", help="First ET game date, YYYY-MM-DD."),
     end: str = typer.Option(None, "--end", help="Last ET game date (default: --start)."),
     season: str = typer.Option(
         "regular-season", "--season",
         help="ESPN season slug: regular-season, preseason, post-season, or 'any'.",
+    ),
+    nightly: bool = typer.Option(
+        False, "--nightly",
+        help="Write data/snapshot_health/<date>.json for the last 3 finished ET days "
+             "that have no report yet (what the GitHub runner does every morning).",
+    ),
+    open_issues: bool = typer.Option(
+        False, "--open-issues",
+        help="With --nightly: open a GitHub issue (via `gh`) for each new unhealthy night.",
     ),
 ) -> None:
     """How close to the ACTUAL tip-off each game's odds were last observed.
@@ -1792,8 +1813,14 @@ def snapshot_health_cmd(
     """
     from datetime import date as _date
     from rich.table import Table
-    from nba_betting.data.snapshot_health import health_report
+    from nba_betting.data.snapshot_health import health_report, is_healthy, summary_line
 
+    if nightly:
+        _snapshot_health_nightly(open_issues)
+        return
+    if not start:
+        console.print("[red]Pass --start YYYY-MM-DD (or --nightly).[/red]")
+        raise typer.Exit(2)
     d0 = _date.fromisoformat(start)
     d1 = _date.fromisoformat(end) if end else d0
     rep = health_report(d0, d1, season=None if season == "any" else season)
@@ -1810,16 +1837,51 @@ def snapshot_health_cmd(
                       f"{r.get('espn_ml_rows', 0)}/{r.get('espn_rows', 0)}" if tip else "-",
                       r.get("note", ""))
     console.print(table)
-    s = rep["summary"]
-    ok = (s["measured"] == s["games"] and s["games"] > 0 and (s["max_min"] or 0) <= 10
-          and s["post_tip_rows"] == 0 and s["freeze_violations"] == 0)
-    share = "-" if s["espn_ml_share"] is None else f"{100 * s['espn_ml_share']:.0f}%"
-    console.print(
-        f"[{'green' if ok else 'yellow'}]{'HEALTHY' if ok else 'CHECK'}[/] games={s['games']} "
-        f"measured={s['measured']} last-observed→tip median={fmt(s['median_min'])} max={fmt(s['max_min'])} min "
-        f"within10={s['within_10']}/{s['measured']} post_tip_rows={s['post_tip_rows']} "
-        f"missing={s['missing']} freeze_violations={s['freeze_violations']} espn_ml={share}"
-    )
+    ok = is_healthy(rep["summary"])
+    console.print(f"[{'green' if ok else 'yellow'}]{'HEALTHY' if ok else 'CHECK'}[/] {summary_line(rep['summary'])}")
+
+
+def _snapshot_health_nightly(open_issues: bool) -> None:
+    """Daily reports for finished days; on the runner, an issue per bad night.
+    Never raises: it runs before the snapshot loop and must not block it."""
+    import os
+    import subprocess
+    import tempfile
+    from nba_betting.data.nba_stats import today_et
+    from nba_betting.data.snapshot_health import issue_body, summary_line, write_daily_reports
+
+    try:
+        written = write_daily_reports(today_et=today_et())
+    except Exception as e:  # noqa: BLE001 — ESPN down etc.; retried next run
+        console.print(f"[yellow]nightly health report skipped: {e}[/yellow]")
+        return
+    if not written:
+        console.print("nightly health report: nothing new")
+    for rep in written:
+        color = {"HEALTHY": "green", "NO GAMES": "dim"}.get(rep["status"], "yellow")
+        console.print(f"[{color}]health {rep['date']} {rep['status']}[/] {summary_line(rep['summary'])}")
+    bad = [r for r in written if r["status"] == "CHECK"]
+    if not (open_issues and bad):
+        return
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+    for rep in bad:
+        title = f"Snapshot health check failed: {rep['date']}"
+        try:
+            found = subprocess.run(
+                ["gh", "issue", "list", "--state", "all", "--search", f'"{title}" in:title',
+                 "--json", "title", "--jq", ".[].title"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if title in found.stdout.splitlines():
+                console.print(f"issue already exists: {title}")
+                continue
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+                f.write(issue_body(rep, mention=owner))
+            made = subprocess.run(["gh", "issue", "create", "--title", title, "--body-file", f.name],
+                                  capture_output=True, text=True, timeout=60)
+            console.print(made.stdout.strip() or f"[yellow]gh issue create failed: {made.stderr.strip()}[/yellow]")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            console.print(f"[yellow]could not open issue for {rep['date']}: {e}[/yellow]")
 
 
 @app.command(name="repair-snapshots")
