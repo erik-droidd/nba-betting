@@ -166,6 +166,7 @@ def fetch_scoreboard(date_str: str | None = None) -> list[dict]:
             "espn_event_id": event.get("id", ""),
             "date": event.get("date", ""),
             "status": comp.get("status", {}).get("type", {}).get("name", ""),
+            "season_slug": (event.get("season") or {}).get("slug", ""),
             "home_team": home_team,
             "away_team": away_team,
             "odds": odds_data,

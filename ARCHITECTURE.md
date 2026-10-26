@@ -161,6 +161,10 @@ nba_betting/
 │   ├── snapshot_loop.py        — The GH Actions run: captures paced on the
 │   │                              next tip-off (30/15/5 min), stops idle
 │   │                              or on budget (→ successor dispatch).
+│   ├── snapshot_health.py      — `snapshot-health`: per game, minutes
+│   │                              between last observation and the ACTUAL
+│   │                              tip (ESPN play-by-play), post-tip rows,
+│   │                              injury-freeze violations.
 │   └── injury_jsonl.py         — DB-free DAILY injury capture (same
 │                                 loop): one ET-dated file per day, each
 │                                 team's lines frozen at its tip-off,
@@ -1272,21 +1276,24 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (196 tests across eighteen files).
+# 7. Full test suite (204 tests across nineteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 196 passed in ~5s.
+# Expect: 204 passed in ~5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
-# test_snapshot_jsonl.py     — 26 tests (JSONL round-trip, idempotence on
+# test_snapshot_jsonl.py     — 28 tests (JSONL round-trip, idempotence on
 #   the capture key, record-date game matching, legacy ESPN proxy blanking,
 #   repair_snapshots incl. post-game + wrong-event rows, ESPN-only slate,
-#   stamp-after-fetch, heartbeat dedupe)
+#   stamp-after-fetch, heartbeat dedupe, no dedupe in a game's final hour,
+#   no exhibitions against non-NBA clubs)
+# test_snapshot_health.py    —  5 tests (actual-tip estimate, union-of-
+#   captures freshness, status-race tolerance, freeze violations)
 # test_snapshot_loop.py      — 19 tests (tip-paced cadence, 18 h idle window,
 #   idle vs budget stop, fetch-failure retries, error tolerance, push throttling)
-# test_espn_odds.py          — 15 tests (current + legacy ESPN moneyline
-#   shapes, de-vig, spread-proxy flag, single-source prob_movement,
-#   no bets priced off the spread proxy)
+# test_espn_odds.py          — 16 tests (current + legacy ESPN moneyline
+#   shapes, de-vig, spread-proxy and one-sided flags, single-source
+#   prob_movement, no bets priced off the spread proxy)
 # test_tier_improvements.py  — 14 tests (off/def Elo, EWM, meta-learner,
 #   signal-dependent Kelly, portfolio Kelly, dedup, fuzzy matching, cache)
 # test_montecarlo.py         — 12 tests (empirical bootstrap, market-null,
@@ -2119,4 +2126,48 @@ games, Oct 6 ET):
   troubleshooting: USAGE.md "External daily trigger". Tested: 200 +
   `workflow_run_id` (run 37661548923). An early test returned a bare 204
   but created no run, so with `return_run_details` the response proves a run exists.
+
+**Follow-up (2026-10-26): first regular-season week (Oct 20-25 ET, 43 games).**
+A cloud check ran the runs/pushes/file checks (all PASS: 72 runs, no
+failure; a loop was up well over 3 h before every first tip, including
+opening night's 19:00Z tip after a 3-day break; pushes every ~30 min,
+max 45 min). It couldn't measure closing lines: its proxy blocks ESPN
+(403). Measured locally with the new `snapshot-health` command: last
+observation a median **2.9 min** before the actual tip, 41/43 within
+10 min, 0 post-tip rows, 0 injury-freeze violations, ESPN moneylines on
+100% of lines with two exceptions.
+
+- **The two outliers were a write blind spot, not missed captures.**
+  OKC@SAS (Oct 20, 11 min) and SAC@LAC (Oct 21, 25 min) were each the last
+  game of the night. Once every other game had tipped, an unchanged price
+  wrote nothing (heartbeat dedupe), so nothing recorded the loop's
+  5-minute captures. Fix: `capture_snapshot_to_jsonl` writes every capture
+  of a game whose listed tip is within 1 h (or past). Its last written
+  line is then exactly its closing line, with the true timestamp. Cost:
+  ~12 lines per game-source per night.
+- **One-sided ESPN moneylines.** For one game (2026-10-11 MIL@CHA, 6 rows)
+  ESPN listed only the away price; `1 - p` kept the whole bookmaker
+  margin on the home side (0.576 vs ~0.555). `prob_source="one-sided"` is
+  now not a market price: spread stored, `home_prob` NULL, no bet priced off it.
+- **Status race.** A capture checks game status, then downloads and stamps
+  the odds, so a row can be stamped seconds after the jump ball (IND@BKN:
+  +2 s, score 0-0). `snapshot-health` allows 60 s; real leakage would show
+  up minutes late.
+- **Push gap.** Pushes happen right after a capture once 30 min have
+  passed, so at a 15-min cadence one can wait for the next capture (45 min
+  on opening night). Harmless: data stays in the run's working copy. Not changed.
+- **Exhibition vs a non-NBA club.** 2026-10-12 POR vs "LON" was captured
+  (13 lines) and reported as `unknown team` on every daily import. The
+  ESPN slate now skips opponents whose ESPN team id isn't one of the 30 NBA
+  franchises (by id, so a renamed NBA code still gets through and still
+  errors loudly at import), and the 13 lines were removed from
+  `data/odds_snapshots/2026-10-12.jsonl`.
+- **Local steps done:** `sync` stored the 43 games and all 43 link to their
+  snapshots (3412 rows); `import-snapshots` has 0 errors; `diagnose` lists
+  the regular-season slate again. `market-eval` still shows n=124: it makes
+  one fold per July-1 season and skips folds under 50 games, so the 2026-27
+  closing lines start counting once 50 games are synced (Oct 27).
+- **cron-job.org shifted with daylight saving** (10:15/19:15 UTC from Oct
+  25): the job followed a European time zone, not UTC. Fix: set the job's
+  time zone to UTC in cron-job.org (USAGE.md "External daily trigger").
 

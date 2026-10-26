@@ -238,7 +238,7 @@ Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py);
    - Repository permissions → **Actions: Read and write**, nothing else.
 
    The current token has no expiration. Its reach is limited to starting, cancelling or deleting this repo's workflow runs. Revoke it on GitHub if your cron-job.org account is ever compromised.
-2. **cron-job.org job** "nba-betting snapshot loop kick", with time zone **UTC**:
+2. **cron-job.org job** "nba-betting snapshot loop kick", with time zone **UTC**. Set it on the job's *Common* tab; jobs otherwise use the account's time zone. A European time zone shifts both triggers by an hour at every daylight-saving change (seen 2026-10-25: 10:15/19:15 UTC instead of 09:15/18:15). That's harmless, but it no longer matches this page.
    - **Schedule:** daily at **09:15** (starts the day's loop; the 18 h window covers first tips up to 03:15 UTC) and **18:15** (backup in case a run died during the day).
    - **Request:** `POST https://api.github.com/repos/erik-droidd/nba-betting/actions/workflows/snapshot-odds.yml/dispatches`
    - **Headers:**
@@ -259,6 +259,13 @@ Logic: [`nba_betting/data/snapshot_loop.py`](nba_betting/data/snapshot_loop.py);
    | 204 with no run ID | The request isn't reaching the workflow endpoint (check the URL) |
 
    If a loop is already running, the triggered run shows as queued and is then cancelled when the loop queues its successor. That's expected: only one run exists at a time.
+
+**Check closing-line freshness.** `snapshot-health` measures, for every finished game in a date range, how many minutes before the **actual** tip-off its odds were last observed. Games tip ~10 min after the listed time, so captures after the listed time are normal; the actual tip comes from ESPN play-by-play.
+```bash
+python3 -m nba_betting snapshot-health --start 2026-10-20 --end 2026-10-25        # regular season (default)
+python3 -m nba_betting snapshot-health --start 2026-10-06 --end 2026-10-07 --season preseason
+```
+It prints **HEALTHY** when every game was observed ≤ 10 min before tip, with no rows after tip (60 s grace for the status-check race) and no injury line updated after a team's tip. It needs ESPN, which some cloud sandboxes block, so run it on your machine. Columns: `written` / `observed` are minutes before tip of the game's last written line / last capture. From 2026-10-26 every capture in a game's final hour is written, so the two agree; before that, a lone late game whose price didn't move could show a large `written` and `observed` gap.
 
 **ESPN odds** carry the real DraftKings moneyline (de-vigged) plus spread and total; the raw American odds are stored in the JSONL too. If ESPN lists only a spread, the record keeps the spread/total and leaves `home_prob` empty. Before 2026-10 ESPN had moved its moneyline field and none were parsed, so every stored ESPN `home_prob` was a 2.5%/point spread proxy. `repair-snapshots` and the importer blank those out.
 
@@ -452,7 +459,7 @@ The output also prints actionable nudges (e.g. "Run `snapshot-odds` on a cron to
 cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 ```
 
-196 fast unit tests (~5 s); the main files:
+204 fast unit tests (~5 s); the main files:
 - **`test_new_features.py`** (16): shrinkage invariants, `humanize_feature` label map, spread/total pick sign convention, driver attribution ordering, backtest `apply_live_strategy` default coupling, and additive DB migration idempotence.
 - **`test_improvements.py`** (15): rolling stats, Four Factors, Elo; portfolio optimizer exposure cap and negative-EV behaviour.
 - **`test_tier_improvements.py`** (14): off/def Elo asymmetry, SOS-adjusted stats, EWM weighting, meta-learner round-trip, signal-dependent Kelly monotonicity, portfolio exposure cap, vectorized opponent-DREB, odds-snapshot dedup, Polymarket fuzzy name matching, model cache mtime invalidation.
@@ -460,6 +467,7 @@ cd "NBA Betting" && .venv/bin/python3 -m pytest tests/ -v
 - **`test_simulate_horizon.py`** (8): data-driven horizon projection, density scaling, edge-case fallbacks.
 - **`test_exhibition_filter.py`** (9): preseason/All-Star games skipped by the game fetchers (so `predict` never stakes on them).
 - **`test_snapshot_jsonl.py`** (26): JSONL round-trip, idempotence on the capture key, game matching (late-tip captures stay on tonight's game; no guessing for preseason), legacy ESPN spread-proxy blanking, `repair-snapshots`, ESPN-only slate, timestamp after fetch, per-date ESPN odds, heartbeat dedupe.
+- **`test_snapshot_health.py`** (5): actual-tip estimate (skips bogus early stamps, ignores stoppage drift), freshness from the union of captures, status-race tolerance, injury-freeze violations.
 - **`test_snapshot_loop.py`** (19): tip-paced cadence, 18 h idle window (a morning cron delivery starts the loop; it still stops overnight), idle vs budget stop (successor dispatch), fetch-failure retries, error tolerance, push throttling.
 - **`test_espn_odds.py`** (15): moneyline parsing from ESPN's current and legacy shapes, de-vig, spread-proxy flagging, single-source `prob_movement`, no bets priced off the spread proxy.
 - **`test_injury_jsonl.py`** (10): ET-dated injury files, per-team tip-off freeze, scoreboard tip detection, idempotent import.
@@ -539,7 +547,7 @@ Opens a web dashboard at `http://localhost:8050` with three tabs:
 | Monthly | `sync-players` | Update player rosters and depth charts |
 | Monthly | `readiness-status` | Check if injury/odds features have enough data to retrain |
 | As needed | `diagnose` | Debug issues with predictions |
-| After any code change | `pytest tests/ -v` | Guard against silent regressions (196 tests) |
+| After any code change | `pytest tests/ -v` | Guard against silent regressions (204 tests) |
 
 ---
 
@@ -596,6 +604,7 @@ python3 -m nba_betting snapshot-odds             # Snapshot current odds (run on
 python3 -m nba_betting snapshot-odds --jsonl data/odds_snapshots  # DB-free, one capture
 python3 -m nba_betting snapshot-loop --skip-nba-api --commit-cmd CMD  # Self-paced capture loop (what GitHub Actions runs)
 python3 -m nba_betting repair-snapshots --dry-run # One-off cleanup of pre-2026-10 snapshot rows (drop --dry-run to apply)
+python3 -m nba_betting snapshot-health --start YYYY-MM-DD --end YYYY-MM-DD  # Closing-line freshness vs actual tips
 python3 -m nba_betting import-snapshots --pull   # Git-pull + load odds + injury JSONL snapshots from GH Actions (daily)
 python3 -m nba_betting import-snapshots          # Same, but without the git pull step
 python3 -m nba_betting snapshot-injuries         # Today's ESPN injury list -> historical_injuries (or --jsonl DIR for file mode)
@@ -620,7 +629,7 @@ python3 -m nba_betting simulate --n-sims 50000
 # Diagnostics
 python3 -m nba_betting diagnose                  # Validate prediction pipeline
 python3 -m nba_betting readiness-status          # Check injury/odds feature accumulation tiers
-pytest tests/ -v                                 # 196 unit tests (run after any code change)
+pytest tests/ -v                                 # 204 unit tests (run after any code change)
 
 # Injuries
 python3 -m nba_betting injury sync               # Auto-sync injuries from ESPN

@@ -80,6 +80,20 @@ def test_get_espn_odds_devigs_moneyline_and_flags_spread_proxy(monkeypatch):
     assert espn_odds.market_home_prob(proxy, "OKC") is None   # never stored as a price
 
 
+def test_one_sided_moneyline_is_not_a_market_price(monkeypatch):
+    """2026-10-11 MIL@CHA: ESPN listed only the away moneyline (+136). 1 - p
+    keeps the whole bookmaker margin on the home side (0.576 vs ~0.555), so
+    it must not be stored or bet against as a market price."""
+    from nba_betting.data import espn_odds
+    games = [{"home_team": {"abbr": "CHA"}, "away_team": {"abbr": "MIL"},
+              "odds": {"home_moneyline": None, "away_moneyline": 136.0, "spread": -3.5, "over_under": 224.5}}]
+    monkeypatch.setattr(espn_odds, "fetch_scoreboard", lambda date_str=None: games)
+    (o,) = espn_odds.get_espn_odds()
+    assert o["prob_source"] == "one-sided"
+    assert espn_odds.market_home_prob(o, "CHA") is None
+    assert o["spread"] == -3.5
+
+
 def test_is_spread_heuristic():
     from nba_betting.data.espn_odds import is_spread_heuristic
     assert is_spread_heuristic(0.5875, -3.5)

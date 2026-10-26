@@ -58,7 +58,9 @@ def get_espn_odds(date_str: str | None = None) -> list[dict]:
 
     Returns list of dicts matching the Polymarket odds format:
     - teams: dict mapping team abbreviation -> implied probability
-    - prob_source: "moneyline" (de-vigged market price) or "spread"
+    - prob_source: "moneyline" (both sides, de-vigged: a market price),
+      "one-sided" (only one side's moneyline, so the bookmaker margin can't
+      be removed: 1 - p overstates the other side by ~2 pts), or "spread"
       (the 2.5%/pt proxy, used only when ESPN lists no moneyline)
     - home_moneyline / away_moneyline: raw American odds (None if absent)
     - spread: home team spread (negative = favored)
@@ -89,8 +91,10 @@ def get_espn_odds(date_str: str | None = None) -> list[dict]:
                 away_prob /= total
         elif home_prob is not None:
             away_prob = 1.0 - home_prob
+            prob_source = "one-sided"
         elif away_prob is not None:
             home_prob = 1.0 - away_prob
+            prob_source = "one-sided"
         else:
             # No moneyline available — try spread as a rough proxy
             spread = odds_data.get("spread")
