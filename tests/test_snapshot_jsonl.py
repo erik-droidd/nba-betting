@@ -1109,3 +1109,21 @@ def test_repair_drops_postgame_prices_and_wrong_polymarket_events(tmp_path, monk
     ]
     again = jsonl.repair_snapshots(tmp_path / "none")
     assert (again["postgame_removed"], again["collision_removed"]) == (0, 0)
+
+
+def test_capture_never_dedupes_in_a_games_final_hour(tmp_path, monkeypatch):
+    """2026-10-21 SAC@LAC: the lone late game's price didn't move, so its
+    last 25 min wrote nothing and the closing line's timestamp lied. Within
+    an hour of the listed tip (or past it — games tip ~10 min late) every
+    capture is written."""
+    from datetime import timedelta
+    from nba_betting.data import snapshot_jsonl as jsonl
+    poly = [{"teams": {"BOS": 0.6, "LAL": 0.4}, "game_date": "2026-10-07"}]
+    _patch_sources(monkeypatch, espn_odds=lambda *a, **kw: [], poly=poly)   # listed tip 23:30Z
+    state: dict = {}
+    hb = timedelta(minutes=30)
+    out = [jsonl.capture_snapshot_to_jsonl(tmp_path, skip_nba_api=True, last_written=state, heartbeat=hb,
+                                           timestamp=datetime(2026, 10, 7, h, m))
+           for h, m in ((22, 0), (22, 10), (22, 35), (22, 40), (23, 35))]
+    # 22:00 written; 22:10 deduped (>1 h out); 22:35, 22:40 and 23:35 (past listed tip) all written
+    assert [o["written"] for o in out] == [1, 0, 1, 1, 1]

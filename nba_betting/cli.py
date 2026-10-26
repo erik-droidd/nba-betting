@@ -1774,6 +1774,54 @@ def snapshot_loop(
             f.write(f"continue={'true' if result.should_continue else 'false'}\n")
 
 
+@app.command(name="snapshot-health")
+def snapshot_health_cmd(
+    start: str = typer.Option(..., "--start", help="First ET game date, YYYY-MM-DD."),
+    end: str = typer.Option(None, "--end", help="Last ET game date (default: --start)."),
+    season: str = typer.Option(
+        "regular-season", "--season",
+        help="ESPN season slug: regular-season, preseason, post-season, or 'any'.",
+    ),
+) -> None:
+    """How close to the ACTUAL tip-off each game's odds were last observed.
+
+    Per finished game: actual tip (from ESPN play-by-play), last written and
+    last observed capture before it, post-tip rows, ESPN moneyline coverage,
+    and injury-freeze violations. Healthy: every game observed <= 10 min
+    before tip, 0 post-tip rows, 0 freeze violations. Needs ESPN access.
+    """
+    from datetime import date as _date
+    from rich.table import Table
+    from nba_betting.data.snapshot_health import health_report
+
+    d0 = _date.fromisoformat(start)
+    d1 = _date.fromisoformat(end) if end else d0
+    rep = health_report(d0, d1, season=None if season == "any" else season)
+    fmt = lambda v: "-" if v is None else f"{v:.1f}"
+    table = Table(title=f"Snapshot health {d0} .. {d1}")
+    # Minutes before the actual tip: last line written / last capture observed.
+    for col in ("ET date", "game", "tip", "written", "observed", "caps", "post", "ESPN ML", "note"):
+        table.add_column(col, no_wrap=True)
+    for r in rep["rows"]:
+        tip = r.get("tip")
+        table.add_row(r["date"], r["game"], tip.strftime("%H:%MZ") if tip else "-",
+                      fmt(r.get("last_written_min")), fmt(r.get("last_observed_min")),
+                      str(r.get("captures", "-")), str(r.get("post_tip_rows", "-")),
+                      f"{r.get('espn_ml_rows', 0)}/{r.get('espn_rows', 0)}" if tip else "-",
+                      r.get("note", ""))
+    console.print(table)
+    s = rep["summary"]
+    ok = (s["measured"] == s["games"] and s["games"] > 0 and (s["max_min"] or 0) <= 10
+          and s["post_tip_rows"] == 0 and s["freeze_violations"] == 0)
+    share = "-" if s["espn_ml_share"] is None else f"{100 * s['espn_ml_share']:.0f}%"
+    console.print(
+        f"[{'green' if ok else 'yellow'}]{'HEALTHY' if ok else 'CHECK'}[/] games={s['games']} "
+        f"measured={s['measured']} last-observed→tip median={fmt(s['median_min'])} max={fmt(s['max_min'])} min "
+        f"within10={s['within_10']}/{s['measured']} post_tip_rows={s['post_tip_rows']} "
+        f"missing={s['missing']} freeze_violations={s['freeze_violations']} espn_ml={share}"
+    )
+
+
 @app.command(name="repair-snapshots")
 def repair_snapshots_cmd(
     path: str = typer.Option("data/odds_snapshots", "--path"),

@@ -297,6 +297,7 @@ def capture_snapshot_to_jsonl(
     skip_nba_api: bool = False,
     last_written: dict | None = None,
     heartbeat: timedelta | None = None,
+    always_write_within: timedelta = timedelta(hours=1),
     clock: Callable[[], datetime] | None = None,
 ) -> dict:
     """Fetch the upcoming slate and current Polymarket/ESPN odds, then
@@ -318,6 +319,11 @@ def capture_snapshot_to_jsonl(
             for the same (game, source) is skipped unless ``heartbeat`` has
             elapsed — line values are lossless, the file stays small.
         heartbeat: See ``last_written``.
+        always_write_within: No dedupe for a game whose listed tip is this
+            close (or past — it tips ~10 min late): its last written line is
+            then exactly its closing line, with the true timestamp. Without
+            this, a lone late game whose price didn't move wrote nothing for
+            its last 25 min (2026-10-21 SAC@LAC), hiding when it was last seen.
         clock: Returns the current aware UTC time. For tests.
 
     Returns a status dict:
@@ -399,13 +405,16 @@ def capture_snapshot_to_jsonl(
     records: list[dict] = []
     deduped = 0
 
-    def _emit(rec: dict, values: tuple) -> None:
+    now_aware = now_naive.replace(tzinfo=timezone.utc)
+
+    def _emit(rec: dict, values: tuple, near_tip: bool = False) -> None:
         nonlocal deduped
         if last_written is not None:
             k = (rec["game_date"], rec["home_team_abbr"], rec["away_team_abbr"], rec["source"])
             prev = last_written.get(k)
             if (
-                prev is not None
+                not near_tip
+                and prev is not None
                 and prev[0] == values
                 and heartbeat is not None
                 and now_naive - prev[1] < heartbeat
@@ -425,6 +434,8 @@ def capture_snapshot_to_jsonl(
         game_date_iso = _game_date_from_game(game)
         et_date = game_date_et(game)
         key = frozenset([home_abbr, away_abbr])
+        tip = _tip_time_utc(game)
+        near_tip = tip is not None and tip - now_aware <= always_write_within
 
         poly = match_odds_for_game(poly_index, key, et_date)
         if poly:
@@ -439,7 +450,7 @@ def capture_snapshot_to_jsonl(
                 "spread": None,
                 "over_under": None,
                 "game_id": game_id,
-            }, (home_prob,))
+            }, (home_prob,), near_tip)
 
         espn = espn_index.get((key, et_date)) or espn_index.get((key, None))
         if espn:
@@ -463,7 +474,7 @@ def capture_snapshot_to_jsonl(
                     "home_moneyline": espn.get("home_moneyline"),
                     "away_moneyline": espn.get("away_moneyline"),
                     "game_id": game_id,
-                }, values)
+                }, values, near_tip)
 
     # Append-only write. Each run adds a block of lines; never rewrites.
     if records:
