@@ -2120,7 +2120,8 @@ games, Oct 6 ET):
   stops overnight (next first tip usually 20+ h after the last tip) —
   except before weekend matinees, which it then bridges.
 - **External daily trigger (set up 2026-10-07).** A cron-job.org job POSTs
-  the workflow's `workflow_dispatch` at 09:15 and 18:15 UTC with a
+  the workflow's `workflow_dispatch` at 11:15 and 20:15 Vienna time
+  (09:15/18:15 UTC in summer, 10:15/19:15 UTC in winter) with a
   fine-grained token (`nba-betting` only, Actions: write, no expiration),
   so the morning restart no longer depends on GitHub's cron. Setup and
   troubleshooting: USAGE.md "External daily trigger". Tested: 200 +
@@ -2168,6 +2169,8 @@ observation a median **2.9 min** before the actual tip, 41/43 within
   one fold per July-1 season and skips folds under 50 games, so the 2026-27
   closing lines start counting once 50 games are synced (Oct 27).
 - **cron-job.org shifted with daylight saving** (10:15/19:15 UTC from Oct
-  25): the job followed a European time zone, not UTC. Fix: set the job's
-  time zone to UTC in cron-job.org (USAGE.md "External daily trigger").
+  25): the job runs on European local time (11:15 / 20:15 Vienna), not UTC.
+  Kept on purpose: it's functionally equivalent (the 18 h window covers any
+  first tip from a 10:15 UTC trigger, and NBA tips shift in UTC with US
+  daylight saving too). The docs now state local time.
 
