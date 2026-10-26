@@ -164,7 +164,10 @@ nba_betting/
 │   ├── snapshot_health.py      — `snapshot-health`: per game, minutes
 │   │                              between last observation and the ACTUAL
 │   │                              tip (ESPN play-by-play), post-tip rows,
-│   │                              injury-freeze violations.
+│   │                              injury-freeze violations. `--nightly`
+│   │                              (runner, every morning) writes
+│   │                              data/snapshot_health/<date>.json and
+│   │                              opens an issue for an unhealthy night.
 │   └── injury_jsonl.py         — DB-free DAILY injury capture (same
 │                                 loop): one ET-dated file per day, each
 │                                 team's lines frozen at its tip-off,
@@ -338,6 +341,7 @@ trained_models/
   spread_regressor.joblib / total_regressor.joblib / regressor_feature_cols.joblib
 data/injury_snapshots/      Daily ESPN injury JSONL from the GH Actions loop (committed)
 data/odds_snapshots/        Odds JSONL from the GH Actions loop (committed)
+data/snapshot_health/       Nightly closing-line health reports (committed by the runner)
 frontend/
   index.html                Single-file dashboard, fetches /api/*
 USAGE.md                    End-user facing operational guide
@@ -1276,9 +1280,9 @@ print('OK')
 # 6. End-to-end diagnose
 .venv/bin/python3 -m nba_betting diagnose
 
-# 7. Full test suite (204 tests across nineteen files).
+# 7. Full test suite (207 tests across nineteen files).
 .venv/bin/python3 -m pytest tests/ -v
-# Expect: 204 passed in ~5s.
+# Expect: 207 passed in ~5s.
 # test_new_features.py       — 22 tests (shrinkage, drivers, spreads, migration)
 # test_improvements.py       — 16 tests (rolling stats, Four Factors, Elo,
 #   portfolio optimizer exposure cap, sigmoid per-fold calibration default)
@@ -1287,8 +1291,9 @@ print('OK')
 #   repair_snapshots incl. post-game + wrong-event rows, ESPN-only slate,
 #   stamp-after-fetch, heartbeat dedupe, no dedupe in a game's final hour,
 #   no exhibitions against non-NBA clubs)
-# test_snapshot_health.py    —  5 tests (actual-tip estimate, union-of-
-#   captures freshness, status-race tolerance, freeze violations)
+# test_snapshot_health.py    —  8 tests (actual-tip estimate, union-of-
+#   captures freshness, status-race tolerance, freeze violations, nightly
+#   reports: wait for finals, write once, NO GAMES; one issue per bad night)
 # test_snapshot_loop.py      — 19 tests (tip-paced cadence, 18 h idle window,
 #   idle vs budget stop, fetch-failure retries, error tolerance, push throttling)
 # test_espn_odds.py          — 16 tests (current + legacy ESPN moneyline
@@ -2173,4 +2178,14 @@ observation a median **2.9 min** before the actual tip, 41/43 within
   Kept on purpose: it's functionally equivalent (the 18 h window covers any
   first tip from a 10:15 UTC trigger, and NBA tips shift in UTC with US
   daylight saving too). The docs now state local time.
+- **Nightly health report (2026-10-26).** The cloud check can't reach
+  ESPN, so the runner, which can, now measures each finished night itself.
+  A workflow step before the loop (`snapshot-health --nightly
+  --open-issues`, `continue-on-error`) writes
+  `data/snapshot_health/<date>.json` for the last 3 ET days that have no
+  report and whose games are all over (`NO GAMES` for off days). The loop
+  commits it. For a `CHECK` night it opens one GitHub issue that
+  @-mentions the repo owner (`issues: write`); `import-snapshots` prints
+  the latest summary. First live dry run: Oct 23-25 all HEALTHY (27
+  games, max 7.7 min before the actual tip).
 

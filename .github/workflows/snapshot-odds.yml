@@ -42,6 +42,7 @@ on:
 permissions:
   contents: write   # commit snapshot files back to main
   actions: write    # dispatch the successor run
+  issues: write     # open an issue for an unhealthy night (health report)
 
 concurrency:
   # One run at a time: never two loops appending to the same files.
@@ -75,6 +76,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
+
+      - name: Nightly health report
+        # Measures the previous night(s): how close to the ACTUAL tip each
+        # game's odds were last observed (ESPN play-by-play; GitHub runners
+        # can reach ESPN, cloud sandboxes can't). Writes
+        # data/snapshot_health/<date>.json (committed by the loop) and opens
+        # an issue for an unhealthy night. Never blocks the loop.
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"
+          GH_TOKEN: ${{ github.token }}
+        run: python -m nba_betting snapshot-health --nightly --open-issues
 
       - name: Snapshot loop
         id: loop
