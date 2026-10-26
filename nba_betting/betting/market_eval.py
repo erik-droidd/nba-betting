@@ -9,7 +9,8 @@ betting knobs:
   model on the SAME games, and which market-shrinkage weight λ
   (``MARKET_SHRINKAGE_LAMBDA``) minimises log-loss? λ = 0.6 is a
   judgment call; this is the harness that can replace it with a fitted
-  value once the snapshot cron has a season of lines.
+  value once ~300 games have a closing line (roughly mid-season with the
+  GitHub snapshot loop).
 * **Spread / total:** are the regression heads' picks (model vs market
   gap beyond ``SPREAD_EDGE_PTS`` / ``TOTAL_EDGE_PTS``) covering at better
   than the 52.4% break-even, and is the model's margin/total more

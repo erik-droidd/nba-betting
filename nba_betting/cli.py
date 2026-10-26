@@ -641,9 +641,9 @@ def clv(limit: int = 20) -> None:
     if not bets_with_clv:
         console.print("[yellow]No CLV data yet.[/yellow]")
         console.print(
-            "[dim]CLV requires at least two odds snapshots per game "
-            "(one before tipoff, one after). Run `snapshot-odds` "
-            "periodically to build history.[/dim]"
+            "[dim]CLV needs an opening and a closing odds snapshot for each "
+            "bet's game. The GitHub snapshot loop captures them; run "
+            "`import-snapshots --pull` and `sync` to load and link them.[/dim]"
         )
         return
 
@@ -775,7 +775,8 @@ def market_eval(
     if n < min_games:
         console.print(
             f"\n[yellow]Not yet informative: {n} games with a closing line "
-            f"(need ≥ {min_games}). Keep the snapshot cron running; re-run next season.[/yellow]"
+            f"(need ≥ {min_games}). The GitHub snapshot loop keeps adding them; "
+            f"re-run after more games (~mid-season).[/yellow]"
         )
     elif ml["t_best_vs_live"] >= 2.0 and abs(ml["best_lambda"] - MARKET_SHRINKAGE_LAMBDA) >= 0.1:
         console.print(
@@ -1934,8 +1935,8 @@ def readiness_status() -> None:
 
     The injury-as-of and real-odds backtest paths need *accumulated*
     historical rows to be useful — they start out empty and only become
-    informative once `snapshot-odds` and `injury sync` have been running
-    on a schedule for a while. This command prints distinct
+    informative once the GitHub snapshot loop (odds + injury lists) has
+    been running for a while. This command prints distinct
     `snapshot_date` counts for each source so the user can decide when
     to rerun `train`/`backtest --real-odds`.
 
