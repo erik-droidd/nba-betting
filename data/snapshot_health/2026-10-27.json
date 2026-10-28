@@ -1,0 +1,74 @@
+{
+ "date": "2026-10-27",
+ "status": "HEALTHY",
+ "generated_at": "2026-10-28T08:33:01Z",
+ "summary": {
+  "games": 4,
+  "measured": 4,
+  "median_min": 1.97,
+  "max_min": 3.92,
+  "within_10": 4,
+  "post_tip_rows": 0,
+  "missing": 0,
+  "freeze_violations": 0,
+  "espn_ml_share": 1.0
+ },
+ "games": [
+  {
+   "date": "2026-10-27",
+   "game": "BKN@BOS",
+   "listed_tip": "2026-10-27T23:30Z",
+   "captures": 42,
+   "first_capture_h": 21.41,
+   "last_written_min": 3.92,
+   "last_observed_min": 3.92,
+   "post_tip_rows": 0,
+   "espn_rows": 42,
+   "espn_ml_rows": 42,
+   "freeze_violations": [],
+   "tip": "2026-10-27T23:40:27Z"
+  },
+  {
+   "date": "2026-10-27",
+   "game": "DET@NYK",
+   "listed_tip": "2026-10-28T00:00Z",
+   "captures": 47,
+   "first_capture_h": 21.95,
+   "last_written_min": 0.78,
+   "last_observed_min": 0.78,
+   "post_tip_rows": 0,
+   "espn_rows": 46,
+   "espn_ml_rows": 46,
+   "freeze_violations": [],
+   "tip": "2026-10-28T00:13:18Z"
+  },
+  {
+   "date": "2026-10-27",
+   "game": "SAC@SAS",
+   "listed_tip": "2026-10-28T00:00Z",
+   "captures": 46,
+   "first_capture_h": 21.91,
+   "last_written_min": 3.15,
+   "last_observed_min": 3.15,
+   "post_tip_rows": 0,
+   "espn_rows": 45,
+   "espn_ml_rows": 45,
+   "freeze_violations": [],
+   "tip": "2026-10-28T00:10:39Z"
+  },
+  {
+   "date": "2026-10-27",
+   "game": "POR@LAL",
+   "listed_tip": "2026-10-28T03:00Z",
+   "captures": 58,
+   "first_capture_h": 24.95,
+   "last_written_min": 0.3,
+   "last_observed_min": 0.3,
+   "post_tip_rows": 0,
+   "espn_rows": 51,
+   "espn_ml_rows": 51,
+   "freeze_violations": [],
+   "tip": "2026-10-28T03:12:53Z"
+  }
+ ]
+}
