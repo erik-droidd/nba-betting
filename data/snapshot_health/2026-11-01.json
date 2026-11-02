@@ -1,0 +1,82 @@
+{
+ "date": "2026-11-01",
+ "status": "CHECK",
+ "generated_at": "2026-11-02T06:03:05Z",
+ "summary": {
+  "games": 4,
+  "measured": 4,
+  "median_min": 0.25,
+  "max_min": 12.03,
+  "within_10": 3,
+  "post_tip_rows": 23,
+  "missing": 0,
+  "freeze_violations": 2,
+  "espn_ml_share": 1.0
+ },
+ "games": [
+  {
+   "date": "2026-11-01",
+   "game": "BOS@ORL",
+   "listed_tip": "2026-11-01T20:30Z",
+   "captures": 42,
+   "first_capture_h": 18.97,
+   "last_written_min": -0.6,
+   "last_observed_min": -0.6,
+   "post_tip_rows": 11,
+   "espn_rows": 38,
+   "espn_ml_rows": 38,
+   "freeze_violations": [
+    "ORL",
+    "BOS"
+   ],
+   "tip": "2026-11-01T19:40:53Z",
+   "note": "FREEZE VIOLATED ORL,BOS"
+  },
+  {
+   "date": "2026-11-01",
+   "game": "BKN@IND",
+   "listed_tip": "2026-11-01T22:00Z",
+   "captures": 44,
+   "first_capture_h": 20.46,
+   "last_written_min": 12.03,
+   "last_observed_min": 12.03,
+   "post_tip_rows": 12,
+   "espn_rows": 41,
+   "espn_ml_rows": 41,
+   "freeze_violations": [
+    "IND",
+    "BKN"
+   ],
+   "tip": "2026-11-01T21:10:49Z",
+   "note": "FREEZE VIOLATED IND,BKN"
+  },
+  {
+   "date": "2026-11-01",
+   "game": "LAC@GSW",
+   "listed_tip": "2026-11-02T01:30Z",
+   "captures": 64,
+   "first_capture_h": 24.97,
+   "last_written_min": 0.3,
+   "last_observed_min": 0.3,
+   "post_tip_rows": 0,
+   "espn_rows": 52,
+   "espn_ml_rows": 52,
+   "freeze_violations": [],
+   "tip": "2026-11-02T01:41:10Z"
+  },
+  {
+   "date": "2026-11-01",
+   "game": "TOR@LAL",
+   "listed_tip": "2026-11-02T02:00Z",
+   "captures": 58,
+   "first_capture_h": 25.48,
+   "last_written_min": 0.2,
+   "last_observed_min": 0.2,
+   "post_tip_rows": 0,
+   "espn_rows": 52,
+   "espn_ml_rows": 52,
+   "freeze_violations": [],
+   "tip": "2026-11-02T02:12:00Z"
+  }
+ ]
+}
