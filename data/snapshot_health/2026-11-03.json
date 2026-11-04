@@ -1,0 +1,17 @@
+{
+ "date": "2026-11-03",
+ "status": "NO GAMES",
+ "generated_at": "2026-11-04T09:13:16Z",
+ "summary": {
+  "games": 0,
+  "measured": 0,
+  "median_min": null,
+  "max_min": null,
+  "within_10": 0,
+  "post_tip_rows": 0,
+  "missing": 0,
+  "freeze_violations": 0,
+  "espn_ml_share": null
+ },
+ "games": []
+}
