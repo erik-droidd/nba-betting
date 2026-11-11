@@ -1,0 +1,102 @@
+{
+ "date": "2026-11-10",
+ "status": "HEALTHY",
+ "generated_at": "2026-11-11T11:24:57Z",
+ "summary": {
+  "games": 6,
+  "measured": 6,
+  "median_min": 3.81,
+  "max_min": 4.25,
+  "within_10": 6,
+  "post_tip_rows": 0,
+  "missing": 0,
+  "freeze_violations": 0,
+  "espn_ml_share": 1.0
+ },
+ "games": [
+  {
+   "date": "2026-11-10",
+   "game": "MIL@NYK",
+   "listed_tip": "2026-11-11T00:30Z",
+   "captures": 47,
+   "first_capture_h": 21.47,
+   "last_written_min": 3.23,
+   "last_observed_min": 3.23,
+   "post_tip_rows": 0,
+   "espn_rows": 46,
+   "espn_ml_rows": 46,
+   "freeze_violations": [],
+   "tip": "2026-11-11T00:41:28Z"
+  },
+  {
+   "date": "2026-11-10",
+   "game": "BOS@PHI",
+   "listed_tip": "2026-11-11T01:00Z",
+   "captures": 48,
+   "first_capture_h": 22.0,
+   "last_written_min": 4.22,
+   "last_observed_min": 4.22,
+   "post_tip_rows": 0,
+   "espn_rows": 48,
+   "espn_ml_rows": 48,
+   "freeze_violations": [],
+   "tip": "2026-11-11T01:13:24Z"
+  },
+  {
+   "date": "2026-11-10",
+   "game": "LAC@PHX",
+   "listed_tip": "2026-11-11T02:00Z",
+   "captures": 53,
+   "first_capture_h": 22.96,
+   "last_written_min": 4.2,
+   "last_observed_min": 4.2,
+   "post_tip_rows": 0,
+   "espn_rows": 48,
+   "espn_ml_rows": 48,
+   "freeze_violations": [],
+   "tip": "2026-11-11T02:10:51Z"
+  },
+  {
+   "date": "2026-11-10",
+   "game": "MIA@UTA",
+   "listed_tip": "2026-11-11T02:00Z",
+   "captures": 55,
+   "first_capture_h": 22.96,
+   "last_written_min": 4.25,
+   "last_observed_min": 4.25,
+   "post_tip_rows": 0,
+   "espn_rows": 50,
+   "espn_ml_rows": 50,
+   "freeze_violations": [],
+   "tip": "2026-11-11T02:10:54Z"
+  },
+  {
+   "date": "2026-11-10",
+   "game": "ORL@SAC",
+   "listed_tip": "2026-11-11T03:00Z",
+   "captures": 56,
+   "first_capture_h": 23.96,
+   "last_written_min": 2.4,
+   "last_observed_min": 2.4,
+   "post_tip_rows": 0,
+   "espn_rows": 52,
+   "espn_ml_rows": 52,
+   "freeze_violations": [],
+   "tip": "2026-11-11T03:10:52Z"
+  },
+  {
+   "date": "2026-11-10",
+   "game": "OKC@POR",
+   "listed_tip": "2026-11-11T04:00Z",
+   "captures": 53,
+   "first_capture_h": 25.0,
+   "last_written_min": 3.42,
+   "last_observed_min": 3.42,
+   "post_tip_rows": 0,
+   "espn_rows": 53,
+   "espn_ml_rows": 53,
+   "freeze_violations": [],
+   "tip": "2026-11-11T04:13:42Z"
+  }
+ ]
+}
