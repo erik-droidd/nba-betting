@@ -1,0 +1,88 @@
+{
+ "date": "2026-11-14",
+ "status": "HEALTHY",
+ "generated_at": "2026-11-15T06:48:16Z",
+ "summary": {
+  "games": 5,
+  "measured": 5,
+  "median_min": 2.77,
+  "max_min": 3.58,
+  "within_10": 5,
+  "post_tip_rows": 0,
+  "missing": 0,
+  "freeze_violations": 0,
+  "espn_ml_share": 1.0
+ },
+ "games": [
+  {
+   "date": "2026-11-14",
+   "game": "DEN@NOP",
+   "listed_tip": "2026-11-15T00:00Z",
+   "captures": 45,
+   "first_capture_h": 20.47,
+   "last_written_min": 3.58,
+   "last_observed_min": 3.58,
+   "post_tip_rows": 0,
+   "espn_rows": 40,
+   "espn_ml_rows": 40,
+   "freeze_violations": [],
+   "tip": "2026-11-15T00:10:32Z"
+  },
+  {
+   "date": "2026-11-14",
+   "game": "DAL@CLE",
+   "listed_tip": "2026-11-15T00:30Z",
+   "captures": 47,
+   "first_capture_h": 20.98,
+   "last_written_min": 3.53,
+   "last_observed_min": 3.53,
+   "post_tip_rows": 0,
+   "espn_rows": 44,
+   "espn_ml_rows": 44,
+   "freeze_violations": [],
+   "tip": "2026-11-15T00:41:23Z"
+  },
+  {
+   "date": "2026-11-14",
+   "game": "DET@MIA",
+   "listed_tip": "2026-11-15T01:00Z",
+   "captures": 52,
+   "first_capture_h": 21.48,
+   "last_written_min": 2.77,
+   "last_observed_min": 2.77,
+   "post_tip_rows": 0,
+   "espn_rows": 46,
+   "espn_ml_rows": 46,
+   "freeze_violations": [],
+   "tip": "2026-11-15T01:11:32Z"
+  },
+  {
+   "date": "2026-11-14",
+   "game": "BKN@MEM",
+   "listed_tip": "2026-11-15T01:00Z",
+   "captures": 50,
+   "first_capture_h": 21.47,
+   "last_written_min": 2.08,
+   "last_observed_min": 2.08,
+   "post_tip_rows": 0,
+   "espn_rows": 46,
+   "espn_ml_rows": 46,
+   "freeze_violations": [],
+   "tip": "2026-11-15T01:10:51Z"
+  },
+  {
+   "date": "2026-11-14",
+   "game": "CHI@MIN",
+   "listed_tip": "2026-11-15T01:00Z",
+   "captures": 48,
+   "first_capture_h": 21.47,
+   "last_written_min": 1.95,
+   "last_observed_min": 1.95,
+   "post_tip_rows": 0,
+   "espn_rows": 45,
+   "espn_ml_rows": 45,
+   "freeze_violations": [],
+   "tip": "2026-11-15T01:10:43Z"
+  }
+ ]
+}
