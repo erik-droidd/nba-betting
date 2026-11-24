@@ -422,3 +422,4 @@
 {"game_date":"2026-11-24","home_team_abbr":"WAS","away_team_abbr":"BOS","source":"espn","timestamp":"2026-11-24T21:13:16","home_prob":0.22284217330656958,"spread":10.5,"over_under":218.5,"home_moneyline":331.0,"away_moneyline":-424.0,"game_id":null}
 {"game_date":"2026-11-24","home_team_abbr":"DEN","away_team_abbr":"DAL","source":"polymarket","timestamp":"2026-11-24T21:13:16","home_prob":0.715,"spread":null,"over_under":null,"game_id":null}
 {"game_date":"2026-11-24","home_team_abbr":"DEN","away_team_abbr":"DAL","source":"espn","timestamp":"2026-11-24T21:13:16","home_prob":0.7183937805457628,"spread":-8.5,"over_under":234.5,"home_moneyline":-297.0,"away_moneyline":241.0,"game_id":null}
+{"game_date":"2026-11-24","home_team_abbr":"ORL","away_team_abbr":"DET","source":"espn","timestamp":"2026-11-24T21:28:41","home_prob":0.4572564612326044,"spread":1.5,"over_under":212.5,"home_moneyline":110.0,"away_moneyline":-130.0,"game_id":null}
